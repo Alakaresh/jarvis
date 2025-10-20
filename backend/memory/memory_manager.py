@@ -4,11 +4,23 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-import chromadb
-from chromadb.utils import embedding_functions
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+except ImportError as exc:  # pragma: no cover - optional dependency
+    chromadb = None
+    embedding_functions = None
+    _IMPORT_ERROR = exc
+else:
+    _IMPORT_ERROR = None
 
 class VectorMemory:
     def __init__(self, api_key: str, persist_dir: str = "./memory/chroma"):
+        if _IMPORT_ERROR is not None:
+            raise RuntimeError(
+                "Le module 'chromadb' est requis pour activer la mémoire vectorielle."
+            ) from _IMPORT_ERROR
+
         self.client = chromadb.PersistentClient(path=persist_dir)
 
         # Utilise OpenAI pour générer les embeddings

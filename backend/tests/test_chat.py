@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -65,7 +67,7 @@ def test_chat_endpoint_success(monkeypatch):
     response = client.post("/chat", json={"text": "hello"})
 
     assert response.status_code == 200
-    assert response.json() == {"response": "echo: hello"}
+    assert response.json() == {"response": "echo: Demande de l'utilisateur :\nhello"}
 
 
 def test_chat_endpoint_provider_error(monkeypatch):
@@ -92,3 +94,33 @@ def test_chat_endpoint_configuration_error(monkeypatch):
 
     assert response.status_code == 500
     assert response.json()["detail"] == "config broken"
+
+
+def test_chat_endpoint_with_attachments(monkeypatch):
+    captured_prompt: dict[str, str] = {}
+
+    class DummyProvider:
+        def generate_response(self, prompt: str) -> str:
+            captured_prompt["prompt"] = prompt
+            return "ok"
+
+    monkeypatch.setattr("backend.main._provider", DummyProvider())
+    monkeypatch.setattr("backend.main._provider_error", None)
+
+    client = TestClient(app)
+    payload = {
+        "text": "Peux-tu aider ?",
+        "files": [
+            {
+                "name": "note.txt",
+                "type": "text/plain",
+                "content": base64.b64encode(b"Information cruciale").decode(),
+            }
+        ],
+    }
+
+    response = client.post("/chat", json=payload)
+
+    assert response.status_code == 200
+    assert response.json() == {"response": "ok"}
+    assert "Information cruciale" in captured_prompt["prompt"]
