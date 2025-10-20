@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -60,6 +62,7 @@ def test_chat_endpoint_success(monkeypatch):
 
     monkeypatch.setattr("backend.main._provider", DummyProvider())
     monkeypatch.setattr("backend.main._provider_error", None)
+    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
 
     client = TestClient(app)
     response = client.post("/chat", json={"text": "hello"})
@@ -75,6 +78,7 @@ def test_chat_endpoint_provider_error(monkeypatch):
 
     monkeypatch.setattr("backend.main._provider", FailingProvider())
     monkeypatch.setattr("backend.main._provider_error", None)
+    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
 
     client = TestClient(app)
     response = client.post("/chat", json={"text": "hello"})
@@ -86,9 +90,45 @@ def test_chat_endpoint_provider_error(monkeypatch):
 def test_chat_endpoint_configuration_error(monkeypatch):
     monkeypatch.setattr("backend.main._provider", None)
     monkeypatch.setattr("backend.main._provider_error", ProviderConfigurationError("config broken"))
+    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
 
     client = TestClient(app)
     response = client.post("/chat", json={"text": "ignored"})
 
     assert response.status_code == 500
     assert response.json()["detail"] == "config broken"
+
+
+def test_chat_includes_recent_history(monkeypatch):
+    prompts: list[str] = []
+
+    class RecordingProvider:
+        def generate_response(self, prompt: str) -> str:
+            prompts.append(prompt)
+            return "réponse"
+
+    history = deque(maxlen=5)
+    for idx in range(1, 6):
+        history.append((f"question {idx}", f"réponse {idx}"))
+
+    monkeypatch.setattr("backend.main._provider", RecordingProvider())
+    monkeypatch.setattr("backend.main._provider_error", None)
+    monkeypatch.setattr("backend.main._memory", None)
+    monkeypatch.setattr("backend.main._recent_history", history)
+
+    client = TestClient(app)
+    response = client.post("/chat", json={"text": "quelle est la météo ?"})
+
+    assert response.status_code == 200
+    assert response.json() == {"response": "réponse"}
+
+    assert prompts, "Le provider aurait dû être appelé"
+    prompt = prompts[0]
+    assert "Voici les derniers échanges" in prompt
+    for idx in range(1, 6):
+        assert f"question {idx}" in prompt
+        assert f"réponse {idx}" in prompt
+    assert "Nouvelle demande :\nquelle est la météo ?" in prompt
+
+    assert len(history) == 5
+    assert history[-1] == ("quelle est la météo ?", "réponse")
