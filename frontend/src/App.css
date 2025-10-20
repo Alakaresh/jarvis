@@ -102,23 +102,6 @@
   padding: 8px;
 }
 
-.input-wrapper button {
-  background-color: #2563eb;
-  color: white;
-  border: none;
-  border-radius: 9999px;
-  padding: 10px 18px;
-  margin-left: 8px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.input-wrapper button:hover {
-  background-color: #1d4ed8;
-  transform: scale(1.05);
-}
-
 /* ----- Scrollbar discrète ----- */
 .chat-container::-webkit-scrollbar {
   width: 6px;

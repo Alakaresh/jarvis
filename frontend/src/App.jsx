@@ -61,9 +61,8 @@ function App() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-            placeholder="Écris ton message ici..."
+            placeholder="Écris ton message ici... (appuie sur Entrée pour envoyer)"
           />
-          <button onClick={sendMessage}>Envoyer</button>
         </div>
       </footer>
     </div>
