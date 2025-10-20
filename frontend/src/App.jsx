@@ -92,8 +92,8 @@ function App() {
       </main>
 
       <footer className="sticky bottom-0 border-t border-white/10 bg-gradient-to-t from-[#171923]/95 via-[#171923]/80 to-transparent px-4 py-8 backdrop-blur">
-        <div className="mx-auto w-full max-w-3xl">
-          <div className="relative flex items-center gap-4 rounded-full border-2 border-[#ff6f3d] bg-[#23242b] px-6 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.45)] transition focus-within:border-[#ff8a57]">
+        <div className="mx-auto max-w-2xl">
+          <div className="relative flex items-center gap-4 rounded-full border border-white/10 bg-[#23242b] px-6 py-4 shadow-[0_12px_30px_rgba(0,0,0,0.45)] transition focus-within:border-white/20">
             <input
               type="text"
               value={input}
