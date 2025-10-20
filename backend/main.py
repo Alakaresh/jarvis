@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from config import settings
+from memory.memory_manager import VectorMemory
 from services.ai_provider import (
     AIProvider,
     ProviderConfigurationError,
@@ -30,6 +33,7 @@ class Message(BaseModel):
 
 _provider: AIProvider | None = None
 _provider_error: ProviderConfigurationError | None = None
+_memory: VectorMemory | None = None
 
 
 def _initialise_provider() -> None:
@@ -51,6 +55,25 @@ def _initialise_provider() -> None:
 _initialise_provider()
 
 
+def _initialise_memory() -> None:
+    global _memory
+
+    try:
+        if not settings.openai_api_key:
+            raise RuntimeError("Une clé API OpenAI est requise pour activer la mémoire vectorielle.")
+
+        persist_dir = Path(__file__).resolve().parent / "memory" / "chroma_store"
+        persist_dir.mkdir(parents=True, exist_ok=True)
+
+        _memory = VectorMemory(api_key=settings.openai_api_key, persist_dir=str(persist_dir))
+    except Exception as exc:  # pragma: no cover - log only
+        _memory = None
+        print("⚠️ Impossible d'initialiser la mémoire vectorielle:", exc)
+
+
+_initialise_memory()
+
+
 @app.post("/chat")
 def chat(msg: Message):
     try:
@@ -63,7 +86,35 @@ def chat(msg: Message):
         if _provider is None:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
 
-        response_text = _provider.generate_response(msg.text)
+        prompt = msg.text
+
+        relevant_memories: list[str] = []
+        if _memory is not None:
+            try:
+                relevant_memories = [memory for memory in _memory.retrieve_relevant(msg.text) if memory]
+            except Exception as exc:  # pragma: no cover - log only
+                print("⚠️ Impossible de récupérer la mémoire vectorielle:", exc)
+
+        if relevant_memories:
+            memories_block = "\n".join(f"- {memory}" for memory in relevant_memories)
+            prompt = (
+                "Voici des souvenirs issus de conversations précédentes qui peuvent t'aider :\n"
+                f"{memories_block}\n\n"
+                "En t'appuyant dessus si nécessaire, réponds à la demande suivante :\n"
+                f"{msg.text}"
+            )
+
+        response_text = _provider.generate_response(prompt)
+
+        if _memory is not None:
+            try:
+                _memory.add_memory(
+                    f"Utilisateur : {msg.text}\nJarvis : {response_text}",
+                    metadata={"source": "conversation"},
+                )
+            except Exception as exc:  # pragma: no cover - log only
+                print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
+
         return {"response": response_text}
 
     except Exception as e:
