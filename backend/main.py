@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+from collections import deque
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from config import settings
-from memory.memory_manager import VectorMemory
-from services.ai_provider import (
+from backend.config import settings
+try:
+    from backend.memory.memory_manager import VectorMemory
+except Exception as exc:  # pragma: no cover - optional dependency
+    VectorMemory = None  # type: ignore[assignment]
+    _memory_import_error: Exception | None = exc
+else:
+    _memory_import_error = None
+from backend.services.ai_provider import (
     AIProvider,
     ProviderConfigurationError,
     ProviderRequestError,
@@ -34,6 +41,8 @@ class Message(BaseModel):
 _provider: AIProvider | None = None
 _provider_error: ProviderConfigurationError | None = None
 _memory: VectorMemory | None = None
+_RECENT_HISTORY_LIMIT = 5
+_recent_history: deque[tuple[str, str]] = deque(maxlen=_RECENT_HISTORY_LIMIT)
 
 
 def _initialise_provider() -> None:
@@ -59,6 +68,9 @@ def _initialise_memory() -> None:
     global _memory
 
     try:
+        if VectorMemory is None:
+            raise RuntimeError("La mémoire vectorielle n'est pas disponible.") from _memory_import_error
+
         if not settings.openai_api_key:
             raise RuntimeError("Une clé API OpenAI est requise pour activer la mémoire vectorielle.")
 
@@ -95,16 +107,34 @@ def chat(msg: Message):
             except Exception as exc:  # pragma: no cover - log only
                 print("⚠️ Impossible de récupérer la mémoire vectorielle:", exc)
 
-        if relevant_memories:
-            memories_block = "\n".join(f"- {memory}" for memory in relevant_memories)
-            prompt = (
-                "Voici des souvenirs issus de conversations précédentes qui peuvent t'aider :\n"
-                f"{memories_block}\n\n"
-                "En t'appuyant dessus si nécessaire, réponds à la demande suivante :\n"
-                f"{msg.text}"
+        prompt_sections: list[str] = []
+
+        if _recent_history:
+            history_entries = []
+            for index, (question, answer) in enumerate(_recent_history, start=1):
+                history_entries.append(
+                    f"Échange {index} :\nUtilisateur : {question}\nJarvis : {answer}"
+                )
+            prompt_sections.append(
+                "Voici les derniers échanges avec l'utilisateur pour te donner du contexte :\n"
+                + "\n\n".join(history_entries)
             )
 
-        response_text = _provider.generate_response(prompt)
+        if relevant_memories:
+            memories_block = "\n".join(f"- {memory}" for memory in relevant_memories)
+            prompt_sections.append(
+                "Voici des souvenirs issus de conversations précédentes qui peuvent t'aider :\n"
+                f"{memories_block}"
+            )
+
+        if prompt_sections:
+            prompt_sections.append("Nouvelle demande :\n" + msg.text)
+            prompt = "\n\n".join(prompt_sections)
+
+        try:
+            response_text = _provider.generate_response(prompt)
+        except ProviderRequestError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
         if _memory is not None:
             try:
@@ -115,8 +145,12 @@ def chat(msg: Message):
             except Exception as exc:  # pragma: no cover - log only
                 print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
 
+        _recent_history.append((msg.text, response_text))
+
         return {"response": response_text}
 
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         print("❌ ERREUR DANS /chat :", e)
