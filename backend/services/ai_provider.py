@@ -54,6 +54,12 @@ class OpenAIProvider:
                 ],
             )
 
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                prompt_tokens = getattr(usage, "prompt_tokens", None)
+                if prompt_tokens is not None:
+                    print(f"🧮 Tokens envoyés au modèle : {prompt_tokens}")
+
             return response.choices[0].message.content.strip()
         except Exception as exc:
             print("❌ Erreur OpenAI:", exc)
