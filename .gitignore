@@ -1,0 +1,24 @@
+# --- ENV & clés ---
+backend/.env
+.env
+
+# --- Python ---
+__pycache__/
+*.pyc
+venv/
+*.pyo
+
+# --- FastAPI Memory / Cache ---
+backend/memory/chroma/
+
+# --- Node / React ---
+node_modules/
+frontend/node_modules/
+dist/
+build/
+
+# --- VS Code / Windows ---
+.vscode/
+*.log
+.DS_Store
+Thumbs.db
