@@ -1,6 +1,10 @@
-"""Mémoire vectorielle pour Jarvis."""
+"""Gestion simplifiée de la mémoire vectorielle de Jarvis."""
+
+from __future__ import annotations
+
+from uuid import uuid4
+
 import chromadb
-from openai import OpenAI
 from chromadb.utils import embedding_functions
 
 class VectorMemory:
@@ -19,19 +23,19 @@ class VectorMemory:
             embedding_function=self.embedding_function
         )
 
-    def add_memory(self, content: str, metadata: dict = None):
+    def add_memory(self, content: str, metadata: dict | None = None) -> None:
         """Ajoute une information à la mémoire vectorielle."""
         self.collection.add(
             documents=[content],
             metadatas=[metadata or {}],
-            ids=[f"mem_{len(self.collection.get()['ids'])+1}"]
+            ids=[f"mem_{uuid4()}"],
         )
 
-    def retrieve_relevant(self, query: str, n: int = 5):
+    def retrieve_relevant(self, query: str, n: int = 5) -> list[str]:
         """Recherche les souvenirs les plus pertinents pour une question."""
         results = self.collection.query(query_texts=[query], n_results=n)
-        return results.get("documents", [[]])[0]
+        return list(results.get("documents", [[]])[0])
 
-    def clear_memory(self):
+    def clear_memory(self) -> None:
         """Efface toute la mémoire."""
         self.collection.delete(where={})
