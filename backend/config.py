@@ -4,7 +4,10 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from typing import Any
+from dotenv import load_dotenv  # 👈 AJOUT IMPORTANT
 
+# Charger les variables du fichier .env
+load_dotenv(dotenv_path=".env")
 
 class Settings:
     """Simple settings loader relying on environment variables."""
@@ -23,7 +26,6 @@ class Settings:
 
     def model_dump(self) -> dict[str, Any]:
         """Expose settings as a dictionary for convenience."""
-
         return {
             "ai_provider": self.ai_provider,
             "openai_api_key": self.openai_api_key,
@@ -36,7 +38,6 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached application settings."""
-
     return Settings()
 
 

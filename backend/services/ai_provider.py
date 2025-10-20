@@ -3,10 +3,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
-
 import httpx
+from openai import OpenAI  # ✅ Nouveau SDK officiel
 
 
+# === Exceptions ===
 class ProviderError(Exception):
     """Base exception for provider related issues."""
 
@@ -19,6 +20,7 @@ class ProviderRequestError(ProviderError):
     """Raised when a provider request fails."""
 
 
+# === Interface commune ===
 @runtime_checkable
 class AIProvider(Protocol):
     """Common interface implemented by AI providers."""
@@ -27,9 +29,10 @@ class AIProvider(Protocol):
         """Generate a textual response for the given prompt."""
 
 
+# === Implémentation OpenAI (nouveau SDK) ===
 @dataclass
 class OpenAIProvider:
-    """Provider backed by the OpenAI API."""
+    """Provider backed by the OpenAI API (v1+ SDK)."""
 
     api_key: str
     model: str = "gpt-3.5-turbo"
@@ -38,27 +41,26 @@ class OpenAIProvider:
         if not self.api_key:
             raise ProviderConfigurationError("An OpenAI API key is required")
 
+        # Création du client OpenAI une fois pour toutes
+        self.client = OpenAI(api_key=self.api_key)
+
     def generate_response(self, prompt: str) -> str:
         try:
-            import openai
-        except ImportError as exc:  # pragma: no cover - defensive, depends on environment
-            raise ProviderRequestError("OpenAI SDK is not installed") from exc
-
-        try:
-            openai.api_key = self.api_key  # type: ignore[attr-defined]
-            response = openai.ChatCompletion.create(  # type: ignore[attr-defined]
+            response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "system", "content": "Tu es Jarvis, une IA personnelle utile et amicale."},
+                    {"role": "user", "content": prompt},
+                ],
             )
-        except Exception as exc:  # pragma: no cover - actual API call not covered by tests
+
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            print("❌ Erreur OpenAI:", exc)
             raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
 
-        try:
-            return response["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError, TypeError) as exc:
-            raise ProviderRequestError("Unexpected response structure from OpenAI") from exc
 
-
+# === Implémentation HuggingFace ===
 @dataclass
 class HuggingFaceProvider:
     """Provider backed by the Hugging Face Inference API."""
@@ -78,12 +80,11 @@ class HuggingFaceProvider:
         try:
             response = httpx.post(url, headers=headers, json={"inputs": prompt})
             response.raise_for_status()
-        except httpx.HTTPError as exc:  # pragma: no cover - network failures not deterministic
+        except httpx.HTTPError as exc:
             raise ProviderRequestError("Failed to fetch a response from Hugging Face") from exc
 
         data = response.json()
         if isinstance(data, list) and data:
-            # Text generation models usually return a list of dictionaries.
             generated_text = data[0].get("generated_text")
             if isinstance(generated_text, str):
                 return generated_text
@@ -95,12 +96,16 @@ class HuggingFaceProvider:
         raise ProviderRequestError("Unexpected response structure from Hugging Face")
 
 
+# === Factory ===
 def create_provider(provider_name: str, **kwargs: str | None) -> AIProvider:
     """Factory that instantiates the proper provider."""
 
     normalized_name = provider_name.lower()
     if normalized_name == "openai":
-        return OpenAIProvider(api_key=kwargs.get("openai_api_key") or "", model=kwargs.get("openai_model") or "gpt-3.5-turbo")
+        return OpenAIProvider(
+            api_key=kwargs.get("openai_api_key") or "",
+            model=kwargs.get("openai_model") or "gpt-3.5-turbo",
+        )
     if normalized_name == "huggingface":
         return HuggingFaceProvider(
             model=kwargs.get("huggingface_model") or "",

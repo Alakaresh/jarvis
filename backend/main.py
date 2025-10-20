@@ -4,13 +4,14 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .config import settings
-from .services.ai_provider import (
+from config import settings
+from services.ai_provider import (
     AIProvider,
     ProviderConfigurationError,
     ProviderRequestError,
     create_provider,
 )
+
 
 app = FastAPI()
 
@@ -52,21 +53,25 @@ _initialise_provider()
 
 @app.post("/chat")
 def chat(msg: Message):
-    if _provider_error is not None:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(_provider_error),
-        )
-
-    if _provider is None:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
-
     try:
-        response_text = _provider.generate_response(msg.text)
-    except ProviderRequestError as exc:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        if _provider_error is not None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(_provider_error),
+            )
 
-    return {"response": response_text}
+        if _provider is None:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
+
+        response_text = _provider.generate_response(msg.text)
+        return {"response": response_text}
+
+    except Exception as e:
+        import traceback
+        print("❌ ERREUR DANS /chat :", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 @app.get("/")
