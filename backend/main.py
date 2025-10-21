@@ -2,10 +2,17 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+import sys
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
+# Ensure the "backend" package can be imported when the module is executed
+# directly (e.g. via ``uvicorn main:app`` from inside the ``backend`` folder).
+if __package__ is None or __package__ == "":  # pragma: no cover - environment guard
+    backend_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(backend_root))
 
 from backend.config import settings
 try:
