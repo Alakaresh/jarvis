@@ -22,3 +22,18 @@ build/
 *.log
 .DS_Store
 Thumbs.db
+
+# --- Binary / Assets ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.mp4
+*.mov
+*.avi
+*.pdf
+*.zip
+*.exe
+*.dll
+*.ico
