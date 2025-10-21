@@ -200,37 +200,61 @@
 
 .code-content .token-string {
   color: #facc15;
+  text-shadow: 0 0 12px rgba(250, 204, 21, 0.35);
 }
 
 .code-content .token-number {
   color: #f472b6;
   font-weight: 600;
+  text-shadow: 0 0 10px rgba(244, 114, 182, 0.35);
 }
 
 .code-content .token-keyword {
   color: #60a5fa;
   font-weight: 600;
+  text-shadow: 0 0 12px rgba(96, 165, 250, 0.35);
 }
 
 .code-content .token-status {
   color: #fb7185;
   font-weight: 700;
+  text-shadow: 0 0 14px rgba(251, 113, 133, 0.3);
 }
 
 .code-content .token-process {
   color: #fbbf24;
   font-weight: 600;
+  text-shadow: 0 0 12px rgba(251, 191, 36, 0.28);
 }
 
 .code-content .token-protocol {
   color: #38bdf8;
   font-weight: 600;
   text-transform: uppercase;
+  text-shadow: 0 0 12px rgba(56, 189, 248, 0.3);
 }
 
 .code-content .token-ip {
   color: #34d399;
   font-weight: 600;
+  text-shadow: 0 0 12px rgba(52, 211, 153, 0.28);
+}
+
+.code-content .token-constant {
+  color: #c084fc;
+  font-weight: 600;
+  text-shadow: 0 0 12px rgba(192, 132, 252, 0.3);
+}
+
+.code-content .token-operator {
+  color: #f97316;
+  font-weight: 600;
+  text-shadow: 0 0 12px rgba(249, 115, 22, 0.3);
+}
+
+.code-content .token-punctuation {
+  color: #e2e8f0;
+  opacity: 0.75;
 }
 
 .code-content .token-comment {
