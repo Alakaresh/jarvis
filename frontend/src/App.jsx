@@ -148,6 +148,68 @@ const HASH_COMMENT_LANGUAGES = new Set([
   "powershell",
 ]);
 
+const SELF_REVIEW_SECTION_TITLES = {
+  architecture: "Architecture",
+  securite: "Sécurité",
+  lisibilite_style: "Lisibilité / Style",
+  performance: "Performance",
+  maintenabilite: "Maintenabilité",
+  ameliorations_proposees: "Améliorations proposées",
+};
+
+const formatSelfReviewReport = (report) => {
+  const heading = "📋 Rapport d'auto-revue";
+
+  if (!report || typeof report !== "object") {
+    const rawValue =
+      typeof report === "string"
+        ? report
+        : JSON.stringify(report, null, 2) ?? "";
+
+    const codeFence = "```";
+    const fallbackBlock = rawValue
+      ? `\n\nRéponse brute :\n\n${codeFence}json\n${rawValue}\n${codeFence}`
+      : "";
+
+    return `${heading}\n\nImpossible de lire le rapport retourné par le serveur.${fallbackBlock}`;
+  }
+
+  const sections = Object.entries(SELF_REVIEW_SECTION_TITLES).map(
+    ([key, label]) => {
+      const value =
+        typeof report[key] === "string" && report[key].trim().length > 0
+          ? report[key].trim()
+          : "Aucune information fournie pour cette section.";
+
+      const underline = "―".repeat(label.length || 1);
+      return `${label}\n${underline}\n${value}`;
+    }
+  );
+
+  const additionalKeys = Object.keys(report).filter(
+    (key) => !(key in SELF_REVIEW_SECTION_TITLES)
+  );
+
+  if (additionalKeys.length > 0) {
+    const extras = additionalKeys
+      .map((key) => {
+        const value = report[key];
+        if (typeof value === "string" && value.trim()) {
+          return `- ${key} : ${value.trim()}`;
+        }
+        if (value === null || value === undefined) {
+          return `- ${key} : (information indisponible)`;
+        }
+        return `- ${key} : ${JSON.stringify(value)}`;
+      })
+      .join("\n");
+
+    sections.push(`Autres informations\n--------------------\n${extras}`);
+  }
+
+  return `${heading}\n\n${sections.join("\n\n")}`;
+};
+
 const normaliseLanguage = (language) => {
   if (!language) return undefined;
   const trimmed = language.trim().toLowerCase();
@@ -513,6 +575,7 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const [isSelfReviewLoading, setIsSelfReviewLoading] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -641,6 +704,60 @@ function App() {
   const isActiveConversationLoading = loadingConversationIds.includes(
     activeConversationId
   );
+
+  const triggerSelfReview = async () => {
+    if (isSelfReviewLoading) {
+      return;
+    }
+
+    const conversationIdForRequest =
+      activeConversation?.id ??
+      activeConversationId ??
+      conversations[0]?.id ??
+      1;
+
+    let didAddLoadingFlag = false;
+    setIsSelfReviewLoading(true);
+    setLoadingConversationIds((previousIds) => {
+      if (previousIds.includes(conversationIdForRequest)) {
+        return previousIds;
+      }
+      didAddLoadingFlag = true;
+      return [...previousIds, conversationIdForRequest];
+    });
+
+    try {
+      const response = await fetch("http://127.0.0.1:8000/self-review", {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`Erreur serveur (${response.status})`);
+      }
+
+      const data = await response.json();
+      const formattedReport = formatSelfReviewReport(data?.report);
+      appendMessageToConversation(conversationIdForRequest, {
+        sender: "bot",
+        text: formattedReport,
+      });
+    } catch (error) {
+      console.error("Impossible de lancer l'auto-revue", error);
+      const reason =
+        error instanceof Error ? error.message : "Erreur inconnue.";
+      appendMessageToConversation(conversationIdForRequest, {
+        sender: "bot",
+        text: `⚠️ Impossible de lancer l'auto-revue : ${reason}`,
+      });
+    } finally {
+      if (didAddLoadingFlag) {
+        setLoadingConversationIds((previousIds) =>
+          previousIds.filter((id) => id !== conversationIdForRequest)
+        );
+      }
+      setIsSelfReviewLoading(false);
+    }
+  };
 
   const copyTextToClipboard = async (text) => {
     if (!text) {
@@ -1033,7 +1150,19 @@ function App() {
       </aside>
       <div className="app-container">
         <header className="app-header">
-          🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
+          <h1 className="header-title">
+            🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
+          </h1>
+          <button
+            type="button"
+            className="self-review-button"
+            onClick={triggerSelfReview}
+            disabled={isSelfReviewLoading}
+          >
+            {isSelfReviewLoading
+              ? "Analyse en cours…"
+              : "🔎 Lancer l'auto-revue"}
+          </button>
         </header>
 
         <main ref={chatRef} className="chat-container" aria-live="polite">
