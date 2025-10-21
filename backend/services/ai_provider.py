@@ -56,66 +56,50 @@ class OpenAIProvider:
         self.client = OpenAI(api_key=self.api_key)
 
     def generate_response(
-        self, prompt: str, attachments: list[Attachment] | None = None
-    ) -> str:
-        try:
-            input_content: list[dict[str, str]] = [
-                {"type": "input_text", "text": prompt}
-            ]
+    self, prompt: str, attachments: list[Attachment] | None = None
+) -> str:
+    try:
+        input_content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
 
-            for attachment in attachments or []:
-                mime_type = attachment.content_type or mimetypes.guess_type(attachment.filename)[0]
-                encoded_data = base64.b64encode(attachment.content).decode("utf-8")
+        for attachment in attachments or []:
+            mime_type = attachment.content_type or mimetypes.guess_type(attachment.filename)[0]
+            encoded_data = base64.b64encode(attachment.content).decode("utf-8")
 
-                if mime_type and mime_type.startswith("image/"):
-                    data_uri = f"data:{mime_type};base64,{encoded_data}"
-                    input_content.append({"type": "input_image", "image_url": data_uri})
-                else:
-                    file_payload: dict[str, str] = {
-                        "type": "input_file",
-                        "file_data": encoded_data,
-                    }
-                    if attachment.filename:
-                        file_payload["filename"] = attachment.filename
-                    input_content.append(file_payload)
+            if mime_type and mime_type.startswith("image/"):
+                data_uri = f"data:{mime_type};base64,{encoded_data}"
+                input_content.append({"type": "input_image", "image_url": data_uri})
+            else:
+                file_payload: dict[str, str] = {
+                    "type": "input_file",
+                    "file_data": encoded_data,
+                }
+                if attachment.filename:
+                    file_payload["filename"] = attachment.filename
+                input_content.append(file_payload)
 
-            response = self.client.responses.create(
-                model=self.model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": input_content,
-                    }
-                ],
-                instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
-            )
+        # === STREAMING ===
+        final_text = ""
+        with self.client.responses.stream(
+            model=self.model,
+            input=[{"role": "user", "content": input_content}],
+            instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
+        ) as stream:
+            for event in stream:
+                if event.type == "response.output_text.delta":
+                    delta = event.delta
+                    print(delta, end="", flush=True)  # ⚡ affiche au fur et à mesure
+                    final_text += delta
+                elif event.type == "response.error":
+                    raise ProviderRequestError(event.error.message)
 
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                input_tokens = getattr(usage, "input_tokens", None)
-                if input_tokens is not None:
-                    print(f"🧮 Tokens envoyés au modèle : {input_tokens}")
+            stream.until_done()  # attendre la fin
 
-            result_text = response.output_text.strip()
-            if not result_text:
-                for output in getattr(response, "output", []):
-                    if getattr(output, "type", None) == "message":
-                        for content in getattr(output, "content", []):
-                            if getattr(content, "type", None) == "output_text":
-                                maybe_text = getattr(content, "text", "").strip()
-                                if maybe_text:
-                                    result_text = maybe_text
-                                    break
-                        if result_text:
-                            break
+        return final_text.strip() or "(Réponse vide)"
 
-            if not result_text:
-                raise ProviderRequestError("Empty response received from OpenAI")
+    except Exception as exc:
+        print("❌ Erreur OpenAI:", exc)
+        raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
 
-            return result_text
-        except Exception as exc:
-            print("❌ Erreur OpenAI:", exc)
-            raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
 
 
 # === Implémentation HuggingFace ===
