@@ -505,15 +505,142 @@ const renderRichText = (text, keyBase) => {
 
 function App() {
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState([]);
+  const [conversations, setConversations] = useState([
+    { id: 1, title: "Conversation 1", messages: [] },
+  ]);
+  const [activeConversationId, setActiveConversationId] = useState(1);
+  const [loadingConversationIds, setLoadingConversationIds] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
   const copyTimeoutRef = useRef(null);
+
+  const clearCopyFeedback = () => {
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = null;
+    }
+    setCopiedCodeKey(null);
+  };
+
+  const resetComposer = () => {
+    setInput("");
+    setSelectedFiles([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const appendMessageToConversation = (conversationId, message) => {
+    setConversations((previousConversations) => {
+      const existingConversation = previousConversations.find(
+        (conversation) => conversation.id === conversationId
+      );
+
+      if (!existingConversation) {
+        const fallbackTitle =
+          message.sender === "user" && typeof message.text === "string"
+            ? message.text.trim().split("\n")[0]
+            : `Conversation ${conversationId}`;
+
+        const truncatedTitle =
+          fallbackTitle && fallbackTitle.length > 42
+            ? `${fallbackTitle.slice(0, 39)}…`
+            : fallbackTitle;
+
+        const newConversation = {
+          id: conversationId,
+          title: truncatedTitle || `Conversation ${conversationId}`,
+          messages: [message],
+        };
+
+        conversationCounterRef.current = Math.max(
+          conversationCounterRef.current,
+          conversationId
+        );
+
+        return [newConversation, ...previousConversations];
+      }
+
+      const updatedMessages = [...existingConversation.messages, message];
+      const hasUserTitle = existingConversation.messages.some(
+        (existingMessage) =>
+          existingMessage.sender === "user" &&
+          typeof existingMessage.text === "string" &&
+          existingMessage.text.trim().length > 0
+      );
+
+      let updatedTitle = existingConversation.title;
+
+      if (
+        message.sender === "user" &&
+        typeof message.text === "string" &&
+        message.text.trim().length > 0 &&
+        !hasUserTitle
+      ) {
+        const snippet = message.text.trim().split("\n")[0];
+        updatedTitle =
+          snippet.length > 42 ? `${snippet.slice(0, 39)}…` : snippet;
+      }
+
+      const updatedConversation = {
+        ...existingConversation,
+        title: updatedTitle,
+        messages: updatedMessages,
+      };
+
+      const remainingConversations = previousConversations.filter(
+        (conversation) => conversation.id !== conversationId
+      );
+
+      return [updatedConversation, ...remainingConversations];
+    });
+  };
+
+  const handleSelectConversation = (conversationId) => {
+    if (conversationId === activeConversationId) {
+      return;
+    }
+
+    setActiveConversationId(conversationId);
+    resetComposer();
+    clearCopyFeedback();
+    dragCounter.current = 0;
+    setIsDragging(false);
+  };
+
+  const createNewConversation = () => {
+    conversationCounterRef.current += 1;
+    const newConversationId = conversationCounterRef.current;
+
+    const newConversation = {
+      id: newConversationId,
+      title: `Conversation ${newConversationId}`,
+      messages: [],
+    };
+
+    setConversations((previousConversations) => [
+      newConversation,
+      ...previousConversations,
+    ]);
+    setActiveConversationId(newConversationId);
+    resetComposer();
+    clearCopyFeedback();
+    dragCounter.current = 0;
+    setIsDragging(false);
+  };
+
+  const activeConversation =
+    conversations.find((conversation) => conversation.id === activeConversationId) ??
+    conversations[0];
+  const messages = activeConversation?.messages ?? [];
+  const isActiveConversationLoading = loadingConversationIds.includes(
+    activeConversationId
+  );
 
   const copyTextToClipboard = async (text) => {
     if (!text) {
@@ -677,15 +804,36 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (copyTimeoutRef.current) {
-        clearTimeout(copyTimeoutRef.current);
-      }
+      clearCopyFeedback();
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      conversations.length > 0 &&
+      !conversations.some((conversation) => conversation.id === activeConversationId)
+    ) {
+      setActiveConversationId(conversations[0].id);
+    }
+  }, [conversations, activeConversationId]);
+
   const sendMessage = async () => {
-    if (isLoading) return;
-    if (!input.trim() && selectedFiles.length === 0) return;
+    const trimmedInput = input.trim();
+    const hasAttachments = selectedFiles.length > 0;
+
+    if (isActiveConversationLoading) {
+      return;
+    }
+
+    if (!trimmedInput && !hasAttachments) {
+      return;
+    }
+
+    const conversationIdForRequest = activeConversation?.id;
+
+    if (!conversationIdForRequest) {
+      return;
+    }
 
     const messageText = input;
     const filesToSend = selectedFiles;
@@ -694,14 +842,23 @@ function App() {
       type: file.type,
     }));
 
-    const userMsg = { sender: "user", text: messageText, attachments: attachmentSummaries };
-    setMessages((prev) => [...prev, userMsg]);
-    setInput("");
-    setSelectedFiles([]);
-    fileInputRef.current && (fileInputRef.current.value = "");
+    const userMsg = {
+      sender: "user",
+      text: messageText,
+      attachments: attachmentSummaries,
+    };
+
+    appendMessageToConversation(conversationIdForRequest, userMsg);
+    resetComposer();
 
     try {
-      setIsLoading(true);
+      setLoadingConversationIds((previousIds) => {
+        if (previousIds.includes(conversationIdForRequest)) {
+          return previousIds;
+        }
+
+        return [...previousIds, conversationIdForRequest];
+      });
 
       const formData = new FormData();
       formData.append("text", messageText);
@@ -720,15 +877,17 @@ function App() {
 
       const data = await res.json();
       const botMsg = { sender: "bot", text: data.response };
-      setMessages((prev) => [...prev, botMsg]);
+      appendMessageToConversation(conversationIdForRequest, botMsg);
     } catch {
       const errMsg = {
         sender: "bot",
         text: "⚠️ Erreur : impossible de contacter le serveur.",
       };
-      setMessages((prev) => [...prev, errMsg]);
+      appendMessageToConversation(conversationIdForRequest, errMsg);
     } finally {
-      setIsLoading(false);
+      setLoadingConversationIds((previousIds) =>
+        previousIds.filter((id) => id !== conversationIdForRequest)
+      );
     }
   };
 
@@ -789,85 +948,184 @@ function App() {
 
   useEffect(() => {
     chatRef.current?.scrollTo(0, chatRef.current.scrollHeight);
-  }, [messages]);
+  }, [messages, activeConversationId]);
 
   return (
-    <div className="app-container">
-      <header className="app-header">🤖 Jarvis</header>
-
-      <main ref={chatRef} className="chat-container">
-        {messages.length === 0 && (
-          <p className="empty-message">💬 Dis bonjour à Jarvis pour commencer</p>
-        )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`message ${m.sender === "user" ? "user" : "bot"}`}
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <span className="sidebar-brand">🤖 Jarvis</span>
+          <button
+            type="button"
+            className="new-conversation-button"
+            onClick={createNewConversation}
           >
-            <div className="bubble">
-              {renderMessageContent(m.text, i)}
-              {m.attachments?.length > 0 && (
-                <ul className="attachment-list">
-                  {m.attachments.map((file, idx) => (
-                    <li key={`${file.name}-${idx}`} className="attachment-pill">
-                      📎 {file.name}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        ))}
-      </main>
-
-      <footer className="input-bar">
-        <div
-          className={`input-wrapper ${isDragging ? "dragging" : ""}`}
-          onDragEnter={handleDragEnter}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-        >
-          <label className="file-input-label" title="Ajouter des fichiers">
-            📎
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={handleFileChange}
-            />
-          </label>
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                sendMessage();
-              }
-            }}
-            placeholder="Écris ton message ici... (Entrée pour envoyer ou glisser-déposer des fichiers)"
-          />
+            + Nouvelle conversation
+          </button>
         </div>
-        {selectedFiles.length > 0 && (
-          <div className="pending-attachments">
-            {selectedFiles.map((file, index) => (
-              <span key={`${file.name}-${file.lastModified}-${index}`} className="attachment-pill pending">
-                <span className="pill-name">📎 {file.name}</span>
+        <div
+          className="conversation-list"
+          role="navigation"
+          aria-label="Historique des conversations"
+        >
+          {conversations.length === 0 ? (
+            <p className="conversation-empty">Aucune conversation</p>
+          ) : (
+            conversations.map((conversation) => {
+              const isActive = conversation.id === activeConversationId;
+              const lastMessage =
+                conversation.messages[conversation.messages.length - 1];
+
+              let previewText = "Nouvelle conversation";
+
+              if (lastMessage) {
+                if (
+                  typeof lastMessage.text === "string" &&
+                  lastMessage.text.trim().length > 0
+                ) {
+                  previewText = lastMessage.text.trim().split("\n")[0];
+                } else if (lastMessage.attachments?.length) {
+                  const count = lastMessage.attachments.length;
+                  previewText =
+                    count === 1
+                      ? "📎 1 fichier joint"
+                      : `📎 ${count} fichiers joints`;
+                } else {
+                  previewText = "Message vide";
+                }
+              }
+
+              if (previewText.length > 60) {
+                previewText = `${previewText.slice(0, 57)}…`;
+              }
+
+              const isConversationLoading = loadingConversationIds.includes(
+                conversation.id
+              );
+              const messageCount = conversation.messages.length;
+              const metaText = isConversationLoading
+                ? "Réponse en cours…"
+                : messageCount === 0
+                ? "Aucun message"
+                : `${messageCount} message${messageCount > 1 ? "s" : ""}`;
+
+              return (
                 <button
+                  key={conversation.id}
                   type="button"
-                  className="pill-remove"
-                  onClick={() => removeFileAtIndex(index)}
-                  aria-label={`Retirer ${file.name}`}
+                  className={`conversation-item${
+                    isActive ? " active" : ""
+                  }`}
+                  onClick={() => handleSelectConversation(conversation.id)}
+                  aria-current={isActive ? "page" : undefined}
+                  title={conversation.title}
                 >
-                  ✕
+                  <span className="conversation-title-text">
+                    {conversation.title || `Conversation ${conversation.id}`}
+                  </span>
+                  <span className="conversation-preview">{previewText}</span>
+                  <span className="conversation-meta">{metaText}</span>
                 </button>
-              </span>
-            ))}
+              );
+            })
+          )}
+        </div>
+      </aside>
+      <div className="app-container">
+        <header className="app-header">
+          🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
+        </header>
+
+        <main ref={chatRef} className="chat-container" aria-live="polite">
+          {messages.length === 0 && (
+            <p className="empty-message">
+              💬 Dis bonjour à Jarvis pour commencer
+            </p>
+          )}
+          {messages.map((m, i) => (
+            <div
+              key={`${activeConversation?.id ?? "conversation"}-${i}`}
+              className={`message ${m.sender === "user" ? "user" : "bot"}`}
+            >
+              <div className="bubble">
+                {renderMessageContent(m.text, i)}
+                {m.attachments?.length > 0 && (
+                  <ul className="attachment-list">
+                    {m.attachments.map((file, idx) => (
+                      <li
+                        key={`${file.name}-${idx}`}
+                        className="attachment-pill"
+                      >
+                        📎 {file.name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          ))}
+        </main>
+
+        <footer className="input-bar">
+          <div
+            className={`input-wrapper ${isDragging ? "dragging" : ""} ${
+              isActiveConversationLoading ? "waiting" : ""
+            }`}
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <label className="file-input-label" title="Ajouter des fichiers">
+              📎
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFileChange}
+              />
+            </label>
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  sendMessage();
+                }
+              }}
+              placeholder="Écris ton message ici... (Entrée pour envoyer ou glisser-déposer des fichiers)"
+              aria-label="Message à envoyer à Jarvis"
+            />
           </div>
-        )}
-      </footer>
+          {isActiveConversationLoading && (
+            <div className="conversation-loading-hint">
+              ✨ Jarvis rédige une réponse...
+            </div>
+          )}
+          {selectedFiles.length > 0 && (
+            <div className="pending-attachments">
+              {selectedFiles.map((file, index) => (
+                <span
+                  key={`${file.name}-${file.lastModified}-${index}`}
+                  className="attachment-pill pending"
+                >
+                  <span className="pill-name">📎 {file.name}</span>
+                  <button
+                    type="button"
+                    className="pill-remove"
+                    onClick={() => removeFileAtIndex(index)}
+                    aria-label={`Retirer ${file.name}`}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+        </footer>
+      </div>
     </div>
   );
 }
