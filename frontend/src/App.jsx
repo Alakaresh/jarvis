@@ -5,9 +5,11 @@ function App() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
+  const dragCounter = useRef(0);
 
   const sendMessage = async () => {
     if (isLoading) return;
@@ -58,16 +60,55 @@ function App() {
     }
   };
 
-  const handleFileChange = (event) => {
-    const newFiles = Array.from(event.target.files || []);
-    if (newFiles.length === 0) return;
+  const handleFileSelection = (files) => {
+    const fileArray = Array.from(files || []);
+    if (fileArray.length === 0) return;
 
     setSelectedFiles((prev) => {
-      const combined = [...prev, ...newFiles];
-      return combined;
-    });
+      const existingSignatures = new Set(
+        prev.map((file) => `${file.name}-${file.lastModified}-${file.size}`)
+      );
 
+      const uniqueNewFiles = fileArray.filter(
+        (file) => !existingSignatures.has(`${file.name}-${file.lastModified}-${file.size}`)
+      );
+
+      if (uniqueNewFiles.length === 0) {
+        return prev;
+      }
+
+      return [...prev, ...uniqueNewFiles];
+    });
+  };
+
+  const handleFileChange = (event) => {
+    handleFileSelection(event.target.files);
     event.target.value = "";
+  };
+
+  const handleDragEnter = (event) => {
+    event.preventDefault();
+    dragCounter.current += 1;
+    setIsDragging(true);
+  };
+
+  const handleDragOver = (event) => {
+    event.preventDefault();
+  };
+
+  const handleDragLeave = (event) => {
+    event.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDrop = (event) => {
+    event.preventDefault();
+    dragCounter.current = 0;
+    setIsDragging(false);
+    handleFileSelection(event.dataTransfer?.files);
   };
 
   const removeFileAtIndex = (indexToRemove) => {
@@ -108,7 +149,13 @@ function App() {
       </main>
 
       <footer className="input-bar">
-        <div className="input-wrapper">
+        <div
+          className={`input-wrapper ${isDragging ? "dragging" : ""}`}
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+        >
           <label className="file-input-label" title="Ajouter des fichiers">
             📎
             <input
@@ -128,15 +175,8 @@ function App() {
                 sendMessage();
               }
             }}
-            placeholder="Écris ton message ici... (appuie sur Entrée pour envoyer)"
+            placeholder="Écris ton message ici... (Entrée pour envoyer ou glisser-déposer des fichiers)"
           />
-          <button
-            className="send-button"
-            onClick={sendMessage}
-            disabled={isLoading}
-          >
-            {isLoading ? "Envoi..." : "Envoyer"}
-          </button>
         </div>
         {selectedFiles.length > 0 && (
           <div className="pending-attachments">
