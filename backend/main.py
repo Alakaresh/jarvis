@@ -45,11 +45,20 @@ class Message(BaseModel):
     text: str
 
 
+class DocumentPayload(BaseModel):
+    filename: str
+    content: str
+
+
 _provider: AIProvider | None = None
 _provider_error: ProviderConfigurationError | None = None
 _memory: VectorMemory | None = None
 _RECENT_HISTORY_LIMIT = 5
 _recent_history: deque[tuple[str, str]] = deque(maxlen=_RECENT_HISTORY_LIMIT)
+
+_DOCUMENT_CONTEXT_LIMIT = 3
+_DOCUMENT_MAX_CHARS = 4000
+_uploaded_documents: deque[tuple[str, str]] = deque(maxlen=_DOCUMENT_CONTEXT_LIMIT)
 
 
 def _initialise_provider() -> None:
@@ -93,6 +102,39 @@ def _initialise_memory() -> None:
 _initialise_memory()
 
 
+@app.post("/documents")
+def upload_document(document: DocumentPayload):
+    cleaned_content = document.content.strip()
+    if not cleaned_content:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Le document transmis est vide ou ne contient pas de texte exploitable.",
+        )
+
+    truncated_content = cleaned_content[:_DOCUMENT_MAX_CHARS]
+    document_name = document.filename or "document"
+
+    _uploaded_documents.append((document_name, truncated_content))
+
+    if _memory is not None:
+        try:
+            _memory.add_memory(
+                f"Document téléchargé ({document_name}) :\n{truncated_content}",
+                metadata={
+                    "source": document_name,
+                    "type": "document",
+                },
+            )
+        except Exception as exc:  # pragma: no cover - log only
+            print("⚠️ Impossible d'enregistrer le document dans la mémoire vectorielle:", exc)
+
+    return {
+        "status": "ok",
+        "message": "Document enregistré avec succès.",
+        "document": document_name,
+    }
+
+
 @app.post("/chat")
 def chat(msg: Message):
     try:
@@ -132,6 +174,17 @@ def chat(msg: Message):
             prompt_sections.append(
                 "Voici des souvenirs issus de conversations précédentes qui peuvent t'aider :\n"
                 f"{memories_block}"
+            )
+
+        if _uploaded_documents:
+            document_entries = []
+            for index, (name, content) in enumerate(_uploaded_documents, start=1):
+                document_entries.append(
+                    f"Document {index} ({name}) :\n{content}"
+                )
+            prompt_sections.append(
+                "Voici des documents que l'utilisateur t'a fournis :\n"
+                + "\n\n".join(document_entries)
             )
 
         if prompt_sections:

@@ -90,6 +90,7 @@
   width: 80%;
   max-width: 700px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  gap: 12px;
 }
 
 .input-wrapper input {
@@ -100,6 +101,68 @@
   color: white;
   font-size: 1rem;
   padding: 8px;
+}
+
+.file-upload {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background-color: #343541;
+  border: 1px solid #4b4d5c;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease;
+}
+
+.file-upload:hover {
+  background-color: #3f404d;
+}
+
+.file-upload input {
+  display: none;
+}
+
+.input-wrapper button {
+  border: none;
+  border-radius: 9999px;
+  padding: 10px 16px;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background-color 0.2s ease, transform 0.1s ease;
+  flex-shrink: 0;
+}
+
+.input-wrapper button:active {
+  transform: scale(0.98);
+}
+
+.upload-button {
+  background-color: #4b5563;
+  color: #f8fafc;
+}
+
+.upload-button:hover {
+  background-color: #636f83;
+}
+
+.send-button {
+  background-color: #2563eb;
+  color: white;
+}
+
+.send-button:hover {
+  background-color: #1d4ed8;
+}
+
+.input-wrapper button:disabled,
+.input-wrapper button:disabled:hover {
+  background-color: #3d3f4d;
+  color: #9ca3af;
+  cursor: not-allowed;
+  transform: none;
 }
 
 /* ----- Scrollbar discrète ----- */
