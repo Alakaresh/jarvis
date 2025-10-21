@@ -11,6 +11,76 @@ function App() {
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
 
+  const renderMessageContent = (text) => {
+    if (!text) return null;
+
+    const normaliseNewlines = (value) => value.replace(/\r\n/g, "\n");
+    const codeBlockRegex = /```([^\n\r]*)\r?\n?([\s\S]*?)```/g;
+
+    const segments = [];
+    let lastIndex = 0;
+    let match;
+
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      if (match.index > lastIndex) {
+        const plainText = text.slice(lastIndex, match.index);
+        segments.push({ type: "text", content: normaliseNewlines(plainText) });
+      }
+
+      const language = match[1]?.trim();
+      const codeContent = normaliseNewlines(match[2] ?? "");
+
+      segments.push({
+        type: "code",
+        content: codeContent,
+        language: language || undefined,
+      });
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    if (lastIndex < text.length) {
+      const remainingText = text.slice(lastIndex);
+      segments.push({ type: "text", content: normaliseNewlines(remainingText) });
+    }
+
+    const visibleSegments = segments.filter((segment) => {
+      if (segment.type === "code") {
+        return segment.content.trim() !== "";
+      }
+
+      return segment.content.trim() !== "";
+    });
+
+    if (visibleSegments.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="message-content">
+        {visibleSegments.map((segment, index) => {
+          if (segment.type === "code") {
+            return (
+              <pre
+                key={`code-${index}`}
+                className="message-code-block"
+                data-language={segment.language || undefined}
+              >
+                <code>{segment.content}</code>
+              </pre>
+            );
+          }
+
+          return (
+            <p key={`text-${index}`} className="message-text">
+              {segment.content}
+            </p>
+          );
+        })}
+      </div>
+    );
+  };
+
   const sendMessage = async () => {
     if (isLoading) return;
     if (!input.trim() && selectedFiles.length === 0) return;
@@ -133,7 +203,7 @@ function App() {
             className={`message ${m.sender === "user" ? "user" : "bot"}`}
           >
             <div className="bubble">
-              {m.text}
+              {renderMessageContent(m.text)}
               {m.attachments?.length > 0 && (
                 <ul className="attachment-list">
                   {m.attachments.map((file, idx) => (
