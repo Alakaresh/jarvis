@@ -1,5 +1,371 @@
-import { useState, useRef, useEffect } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import "./App.css";
+
+const LANGUAGE_ALIASES = {
+  js: "javascript",
+  jsx: "javascript",
+  ts: "typescript",
+  tsx: "typescript",
+  py: "python",
+  ps: "powershell",
+  pwsh: "powershell",
+  sh: "bash",
+  zsh: "bash",
+  shell: "bash",
+};
+
+const SHELL_LANGUAGES = new Set(["bash", "sh", "zsh", "powershell"]);
+const C_STYLE_LANGUAGES = new Set([
+  "javascript",
+  "typescript",
+  "java",
+  "c",
+  "cpp",
+  "csharp",
+  "go",
+  "kotlin",
+  "swift",
+  "php",
+  "rust",
+]);
+
+const STATUS_KEYWORDS = new Set([
+  "listening",
+  "established",
+  "time_wait",
+  "close_wait",
+  "syn_sent",
+  "syn_received",
+  "fin_wait_1",
+  "fin_wait_2",
+]);
+
+const PROCESS_KEYWORDS = new Set([
+  "nginx",
+  "uvicorn",
+  "gunicorn",
+  "node",
+  "python",
+  "java",
+  "docker",
+]);
+
+const PROTOCOL_KEYWORDS = new Set([
+  "http",
+  "https",
+  "tcp",
+  "udp",
+  "ws",
+  "wss",
+  "grpc",
+]);
+
+const GENERAL_KEYWORDS = new Set([
+  "const",
+  "let",
+  "var",
+  "function",
+  "return",
+  "if",
+  "else",
+  "for",
+  "while",
+  "class",
+  "def",
+  "async",
+  "await",
+  "import",
+  "from",
+  "try",
+  "catch",
+  "finally",
+  "raise",
+  "except",
+  "true",
+  "false",
+  "none",
+  "null",
+  "undefined",
+  "switch",
+  "case",
+  "break",
+  "continue",
+  "public",
+  "private",
+  "protected",
+  "static",
+  "new",
+  "this",
+  "super",
+  "lambda",
+  "print",
+  "pass",
+  "yield",
+  "export",
+  "extends",
+  "implements",
+  "pid",
+  "netstat",
+]);
+
+const KEYWORD_PATTERN = Array.from(
+  new Set([
+    ...GENERAL_KEYWORDS,
+    ...STATUS_KEYWORDS,
+    ...PROCESS_KEYWORDS,
+    ...PROTOCOL_KEYWORDS,
+  ])
+)
+  .sort()
+  .join("|");
+
+const regexParts = [
+  String.raw`("(?:\\.|[^"\\])*")`,
+  String.raw`('(?:\\.|[^'\\])*')`,
+  String.raw`(\\b\\d{1,3}(?:\\.\\d{1,3}){3}(?::\\d{1,5})?\\b)`,
+  String.raw`(0x[\\da-fA-F]+)`,
+  String.raw`(\\b\\d+(?:\\.\\d+)?\\b)`,
+  String.raw`(\\b(?:${KEYWORD_PATTERN})\\b)`,
+];
+
+const HIGHLIGHT_REGEX = new RegExp(regexParts.join("|"), "gi");
+
+const normaliseLanguage = (language) => {
+  if (!language) return undefined;
+  const trimmed = language.trim().toLowerCase();
+  return LANGUAGE_ALIASES[trimmed] || trimmed;
+};
+
+const isShellLanguage = (language) => {
+  if (!language) return false;
+  return SHELL_LANGUAGES.has(language);
+};
+
+const isCStyleLanguage = (language) => {
+  if (!language) return false;
+  return C_STYLE_LANGUAGES.has(language);
+};
+
+const escapeHtml = (value) =>
+  value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const highlightCommentLine = (line) =>
+  `<span class="token-comment">${escapeHtml(line)}</span>`;
+
+const highlightTokens = (line) =>
+  escapeHtml(line).replace(
+    HIGHLIGHT_REGEX,
+    (
+      match,
+      doubleQuoted,
+      singleQuoted,
+      ipAddress,
+      hexNumber,
+      numberLiteral,
+      keyword
+    ) => {
+      if (doubleQuoted) {
+        return `<span class="token-string">${doubleQuoted}</span>`;
+      }
+
+      if (singleQuoted) {
+        return `<span class="token-string">${singleQuoted}</span>`;
+      }
+
+      if (ipAddress) {
+        return `<span class="token-ip">${ipAddress}</span>`;
+      }
+
+      if (hexNumber) {
+        return `<span class="token-number">${hexNumber}</span>`;
+      }
+
+      if (numberLiteral) {
+        return `<span class="token-number">${numberLiteral}</span>`;
+      }
+
+      if (keyword) {
+        const lowerKeyword = keyword.toLowerCase();
+
+        if (STATUS_KEYWORDS.has(lowerKeyword)) {
+          return `<span class="token-status">${keyword}</span>`;
+        }
+
+        if (PROCESS_KEYWORDS.has(lowerKeyword)) {
+          return `<span class="token-process">${keyword}</span>`;
+        }
+
+        if (PROTOCOL_KEYWORDS.has(lowerKeyword)) {
+          return `<span class="token-protocol">${keyword}</span>`;
+        }
+
+        return `<span class="token-keyword">${keyword}</span>`;
+      }
+
+      return match;
+    }
+  );
+
+const highlightCode = (code, language) => {
+  if (!code) {
+    return "";
+  }
+
+  const canonicalLanguage = normaliseLanguage(language);
+  const segments = code.split(/(\r?\n)/);
+
+  return segments
+    .map((segment, index) => {
+      if (index % 2 === 1) {
+        return segment;
+      }
+
+      if (!segment) {
+        return "";
+      }
+
+      const trimmed = segment.trim();
+
+      if (trimmed.length === 0) {
+        return escapeHtml(segment);
+      }
+
+      const startsWithHash = /^\s*#/.test(segment);
+      const startsWithSlashSlash = /^\s*\//.test(segment.trim());
+
+      if (startsWithHash && (isShellLanguage(canonicalLanguage) || !canonicalLanguage)) {
+        return highlightCommentLine(segment);
+      }
+
+      if (startsWithSlashSlash && (isCStyleLanguage(canonicalLanguage) || !canonicalLanguage)) {
+        return highlightCommentLine(segment);
+      }
+
+      return highlightTokens(segment);
+    })
+    .join("");
+};
+
+const splitIntoParagraphs = (text) => {
+  const paragraphs = text.split(/\n{2,}/);
+  return paragraphs.filter((paragraph) => paragraph.trim() !== "");
+};
+
+const createInlineElements = (text, keyBase) => {
+  if (!text) {
+    return [];
+  }
+
+  const inlineCodeRegex = /`([^`]+)`/g;
+  const parts = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = inlineCodeRegex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push({ type: "text", value: text.slice(lastIndex, match.index) });
+    }
+
+    parts.push({ type: "code", value: match[1] });
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({ type: "text", value: text.slice(lastIndex) });
+  }
+
+  if (parts.length === 0) {
+    parts.push({ type: "text", value: text });
+  }
+
+  return parts.flatMap((part, index) => {
+    if (part.type === "code") {
+      return (
+        <code key={`${keyBase}-code-${index}`} className="inline-code">
+          {part.value}
+        </code>
+      );
+    }
+
+    const segments = part.value.split("\n");
+
+    return segments.flatMap((segment, lineIndex) => {
+      const elements = [
+        <Fragment key={`${keyBase}-text-${index}-${lineIndex}`}>{segment}</Fragment>,
+      ];
+
+      if (lineIndex < segments.length - 1) {
+        elements.push(
+          <br key={`${keyBase}-br-${index}-${lineIndex}`} />
+        );
+      }
+
+      return elements;
+    });
+  });
+};
+
+const renderRichText = (text, keyBase) => {
+  const paragraphs = splitIntoParagraphs(text);
+
+  if (paragraphs.length === 0) {
+    return (
+      <p key={`${keyBase}-paragraph-0`} className="message-text">
+        {createInlineElements(text, `${keyBase}-paragraph-0`)}
+      </p>
+    );
+  }
+
+  return paragraphs.map((paragraph, paragraphIndex) => {
+    const lines = paragraph.split("\n");
+    const isBulletedList = lines.every((line) => /^\s*[-*+]\s+/.test(line));
+    const isOrderedList = lines.every((line) => /^\s*\d+\.\s+/.test(line));
+
+    if (isBulletedList || isOrderedList) {
+      const listItems = lines.filter((line) => line.trim() !== "");
+
+      return (
+        <ul
+          key={`${keyBase}-list-${paragraphIndex}`}
+          className={`message-list ${isOrderedList ? "ordered" : "unordered"}`}
+        >
+          {listItems.map((item, itemIndex) => {
+            const content = item.replace(isOrderedList ? /^\s*\d+\.\s+/ : /^\s*[-*+]\s+/, "");
+
+            return (
+              <li
+                key={`${keyBase}-list-${paragraphIndex}-${itemIndex}`}
+                className="message-list-item"
+              >
+                {createInlineElements(
+                  content,
+                  `${keyBase}-list-${paragraphIndex}-${itemIndex}`
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      );
+    }
+
+    return (
+      <p
+        key={`${keyBase}-paragraph-${paragraphIndex}`}
+        className="message-text"
+      >
+        {createInlineElements(
+          paragraph,
+          `${keyBase}-paragraph-${paragraphIndex}`
+        )}
+      </p>
+    );
+  });
+};
 
 function App() {
   const [input, setInput] = useState("");
@@ -121,10 +487,22 @@ function App() {
         {visibleSegments.map((segment, index) => {
           if (segment.type === "code") {
             const codeKey = `${messageIndex}-code-${index}`;
+            const rawLanguage = segment.language?.trim();
+            const canonicalLanguage = normaliseLanguage(rawLanguage);
+            const displayLanguage = (rawLanguage || canonicalLanguage)?.toUpperCase();
+            const highlightedCode = highlightCode(segment.content, canonicalLanguage);
 
             return (
-              <div key={`code-${index}`} className="message-code-wrapper">
+              <div key={codeKey} className="message-code-wrapper">
                 <div className="code-toolbar">
+                  <div className="code-toolbar-meta" aria-hidden="true">
+                    <span className="toolbar-dot" />
+                    <span className="toolbar-dot" />
+                    <span className="toolbar-dot" />
+                    {displayLanguage ? (
+                      <span className="toolbar-language">{displayLanguage}</span>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     className={`copy-button ${
@@ -133,23 +511,28 @@ function App() {
                     onClick={() => handleCopyCode(segment.content, codeKey)}
                     aria-label="Copier ce bloc de code"
                   >
-                    {copiedCodeKey === codeKey ? "✅ Copié !" : "📋 Copier"}
+                    {copiedCodeKey === codeKey ? "✅ Copié !" : "Copier le code"}
                   </button>
                 </div>
                 <pre
                   className="message-code-block"
-                  data-language={segment.language || undefined}
+                  data-language={displayLanguage || undefined}
                 >
-                  <code>{segment.content}</code>
+                  <code
+                    className={`code-content${
+                      canonicalLanguage ? ` language-${canonicalLanguage}` : ""
+                    }`}
+                    dangerouslySetInnerHTML={{ __html: highlightedCode }}
+                  />
                 </pre>
               </div>
             );
           }
 
           return (
-            <p key={`text-${index}`} className="message-text">
-              {segment.content}
-            </p>
+            <Fragment key={`text-${index}`}>
+              {renderRichText(segment.content, `${messageIndex}-text-${index}`)}
+            </Fragment>
           );
         })}
       </div>
@@ -202,7 +585,7 @@ function App() {
       const data = await res.json();
       const botMsg = { sender: "bot", text: data.response };
       setMessages((prev) => [...prev, botMsg]);
-    } catch (err) {
+    } catch {
       const errMsg = {
         sender: "bot",
         text: "⚠️ Erreur : impossible de contacter le serveur.",
