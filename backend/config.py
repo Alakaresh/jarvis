@@ -16,7 +16,7 @@ class Settings:
         env = os.getenv
         self.ai_provider: str = overrides.get("ai_provider", env("AI_PROVIDER", "openai"))
         self.openai_api_key: str | None = overrides.get("openai_api_key", env("OPENAI_API_KEY"))
-        self.openai_model: str = overrides.get("openai_model", env("OPENAI_MODEL", "gpt-3.5-turbo"))
+        self.openai_model: str = overrides.get("openai_model", env("OPENAI_MODEL", "gpt-4o-mini"))
         self.huggingface_api_key: str | None = overrides.get(
             "huggingface_api_key", env("HUGGINGFACE_API_KEY")
         )

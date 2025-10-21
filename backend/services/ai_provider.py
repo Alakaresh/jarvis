@@ -1,6 +1,8 @@
 """Utilities for interacting with external AI providers."""
 from __future__ import annotations
 
+import base64
+import mimetypes
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 import httpx
@@ -20,12 +22,21 @@ class ProviderRequestError(ProviderError):
     """Raised when a provider request fails."""
 
 
+@dataclass
+class Attachment:
+    """Simple representation of a user supplied file."""
+
+    filename: str
+    content: bytes
+    content_type: str | None = None
+
+
 # === Interface commune ===
 @runtime_checkable
 class AIProvider(Protocol):
     """Common interface implemented by AI providers."""
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(self, prompt: str, attachments: list[Attachment] | None = None) -> str:
         """Generate a textual response for the given prompt."""
 
 
@@ -35,7 +46,7 @@ class OpenAIProvider:
     """Provider backed by the OpenAI API (v1+ SDK)."""
 
     api_key: str
-    model: str = "gpt-3.5-turbo"
+    model: str = "gpt-4o-mini"
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -44,23 +55,64 @@ class OpenAIProvider:
         # Création du client OpenAI une fois pour toutes
         self.client = OpenAI(api_key=self.api_key)
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(
+        self, prompt: str, attachments: list[Attachment] | None = None
+    ) -> str:
         try:
-            response = self.client.chat.completions.create(
+            input_content: list[dict[str, str]] = [
+                {"type": "input_text", "text": prompt}
+            ]
+
+            for attachment in attachments or []:
+                mime_type = attachment.content_type or mimetypes.guess_type(attachment.filename)[0]
+                encoded_data = base64.b64encode(attachment.content).decode("utf-8")
+
+                if mime_type and mime_type.startswith("image/"):
+                    data_uri = f"data:{mime_type};base64,{encoded_data}"
+                    input_content.append({"type": "input_image", "image_url": data_uri})
+                else:
+                    file_payload: dict[str, str] = {
+                        "type": "input_file",
+                        "file_data": encoded_data,
+                    }
+                    if attachment.filename:
+                        file_payload["filename"] = attachment.filename
+                    input_content.append(file_payload)
+
+            response = self.client.responses.create(
                 model=self.model,
-                messages=[
-                    {"role": "system", "content": "Tu es Jarvis, une IA personnelle utile et amicale."},
-                    {"role": "user", "content": prompt},
+                input=[
+                    {
+                        "role": "user",
+                        "content": input_content,
+                    }
                 ],
+                instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
             )
 
             usage = getattr(response, "usage", None)
             if usage is not None:
-                prompt_tokens = getattr(usage, "prompt_tokens", None)
-                if prompt_tokens is not None:
-                    print(f"🧮 Tokens envoyés au modèle : {prompt_tokens}")
+                input_tokens = getattr(usage, "input_tokens", None)
+                if input_tokens is not None:
+                    print(f"🧮 Tokens envoyés au modèle : {input_tokens}")
 
-            return response.choices[0].message.content.strip()
+            result_text = response.output_text.strip()
+            if not result_text:
+                for output in getattr(response, "output", []):
+                    if getattr(output, "type", None) == "message":
+                        for content in getattr(output, "content", []):
+                            if getattr(content, "type", None) == "output_text":
+                                maybe_text = getattr(content, "text", "").strip()
+                                if maybe_text:
+                                    result_text = maybe_text
+                                    break
+                        if result_text:
+                            break
+
+            if not result_text:
+                raise ProviderRequestError("Empty response received from OpenAI")
+
+            return result_text
         except Exception as exc:
             print("❌ Erreur OpenAI:", exc)
             raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
@@ -79,7 +131,9 @@ class HuggingFaceProvider:
         if not self.model:
             raise ProviderConfigurationError("A Hugging Face model identifier is required")
 
-    def generate_response(self, prompt: str) -> str:
+    def generate_response(
+        self, prompt: str, attachments: list[Attachment] | None = None
+    ) -> str:
         url = self.endpoint_template.format(model=self.model)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
 
@@ -110,7 +164,7 @@ def create_provider(provider_name: str, **kwargs: str | None) -> AIProvider:
     if normalized_name == "openai":
         return OpenAIProvider(
             api_key=kwargs.get("openai_api_key") or "",
-            model=kwargs.get("openai_model") or "gpt-3.5-turbo",
+            model=kwargs.get("openai_model") or "gpt-4o-mini",
         )
     if normalized_name == "huggingface":
         return HuggingFaceProvider(
