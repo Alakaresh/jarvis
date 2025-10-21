@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from collections import deque
 from pathlib import Path
 import sys
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import FastAPI, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure the "backend" package can be imported when the module is executed
@@ -119,10 +120,110 @@ async def _execute_self_review() -> dict[str, str]:
     return report
 
 
+
+
+def _provider_supports_attachments(provider: AIProvider) -> bool:
+    """Return True when the provider accepts an ``attachments`` parameter."""
+
+    try:
+        signature = inspect.signature(provider.generate_response)  # type: ignore[attr-defined]
+    except (TypeError, ValueError):  # pragma: no cover - fallback for builtins
+        return True
+
+    for parameter in signature.parameters.values():
+        if parameter.kind in (
+            inspect.Parameter.VAR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            return True
+
+    return "attachments" in signature.parameters
+
+
+def _invoke_provider(
+    provider: AIProvider, prompt: str, attachments: list[Attachment]
+) -> str:
+    """Invoke the provider, gracefully handling optional attachment support."""
+
+    if _provider_supports_attachments(provider):
+        attachments_payload: list[Attachment] | None = attachments or None
+        return provider.generate_response(prompt, attachments_payload)
+
+    return provider.generate_response(prompt)
+
+
+async def _extract_chat_inputs(
+    request: Request,
+) -> tuple[str | None, list[UploadFile]]:
+    """Extract the user text and uploaded files from the request."""
+
+    content_type = request.headers.get("content-type", "").lower()
+
+    if "application/json" in content_type:
+        try:
+            payload = await request.json()
+        except Exception as exc:  # pragma: no cover - unexpected payload
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Corps JSON invalide."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Corps JSON invalide."
+            )
+
+        text_value = payload.get("text")
+        if text_value is None:
+            return None, []
+        if not isinstance(text_value, str):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Le champ 'text' doit être une chaîne de caractères.",
+            )
+
+        return text_value, []
+
+    try:
+        form = await request.form()
+    except Exception as exc:  # pragma: no cover - unexpected payload
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Format de requête non supporté pour l'endpoint /chat.",
+        ) from exc
+
+    raw_text = form.get("text")
+    if isinstance(raw_text, UploadFile):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Le champ 'text' ne doit pas être un fichier.",
+        )
+
+    uploads: list[UploadFile] = []
+    getlist = getattr(form, "getlist", None)
+    if callable(getlist):
+        for entry in getlist("files"):
+            if isinstance(entry, UploadFile):
+                uploads.append(entry)
+    else:  # pragma: no cover - starlette currently exposes getlist()
+        for key, value in form.multi_items():
+            if key == "files" and isinstance(value, UploadFile):
+                uploads.append(value)
+
+    if raw_text is None:
+        return None, uploads
+
+    if not isinstance(raw_text, str):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Le champ 'text' doit être une chaîne de caractères.",
+        )
+
+    return raw_text, uploads
+
+
 @app.post("/chat")
-async def chat(
-    text: str = Form(...), files: list[UploadFile] | None = File(default=None)
-):
+async def chat(request: Request):
+    uploads: list[UploadFile] = []
     try:
         if _provider_error is not None:
             raise HTTPException(
@@ -133,7 +234,20 @@ async def chat(
         if _provider is None:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
 
-        normalized_request = text.strip().lower()
+        raw_text, uploads = await _extract_chat_inputs(request)
+
+        if raw_text is None:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Le champ 'text' est requis."
+            )
+
+        text = raw_text.strip()
+        if not text:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Le champ 'text' est requis."
+            )
+
+        normalized_request = text.lower()
         if any(trigger in normalized_request for trigger in _SELF_REVIEW_TRIGGERS):
             try:
                 audit_report = await _execute_self_review()
@@ -146,7 +260,6 @@ async def chat(
 
         prompt = text
 
-        uploads = files or []
         attachments: list[Attachment] = []
         for upload in uploads:
             content: bytes | None = None
@@ -156,8 +269,6 @@ async def chat(
                 filename = upload.filename or "(inconnu)"
                 print(f"⚠️ Lecture impossible pour le fichier '{filename}':", exc)
                 continue
-            finally:
-                await upload.close()
 
             if not content:
                 continue
@@ -210,7 +321,7 @@ async def chat(
 
         try:
             response_text = await asyncio.to_thread(
-                _provider.generate_response, prompt, attachments
+                _invoke_provider, _provider, prompt, attachments
             )
         except ProviderRequestError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
@@ -248,6 +359,12 @@ async def chat(
         print("❌ ERREUR DANS /chat :", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        for upload in uploads:
+            try:
+                await upload.close()
+            except Exception:
+                pass
 
 
 @app.post("/self-review")
