@@ -7,11 +7,71 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
+  const copyTimeoutRef = useRef(null);
 
-  const renderMessageContent = (text) => {
+  const copyTextToClipboard = async (text) => {
+    if (!text) {
+      return false;
+    }
+
+    const supportsClipboardApi =
+      typeof navigator !== "undefined" &&
+      navigator.clipboard &&
+      typeof navigator.clipboard.writeText === "function";
+
+    if (supportsClipboardApi) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch (error) {
+        console.warn("Échec de l'utilisation du presse-papiers natif", error);
+      }
+    }
+
+    try {
+      if (typeof document === "undefined") {
+        return false;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      textarea.setAttribute("readonly", "");
+      textarea.style.position = "absolute";
+      textarea.style.left = "-9999px";
+      document.body.appendChild(textarea);
+      textarea.select();
+      const successful = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      return successful;
+    } catch (error) {
+      console.error("Impossible de copier le texte", error);
+      return false;
+    }
+  };
+
+  const handleCopyCode = async (text, key) => {
+    const didCopy = await copyTextToClipboard(text);
+
+    if (!didCopy) {
+      return;
+    }
+
+    setCopiedCodeKey(key);
+
+    if (copyTimeoutRef.current) {
+      clearTimeout(copyTimeoutRef.current);
+    }
+
+    copyTimeoutRef.current = setTimeout(() => {
+      setCopiedCodeKey(null);
+    }, 2000);
+  };
+
+  const renderMessageContent = (text, messageIndex) => {
     if (!text) return null;
 
     const normaliseNewlines = (value) => value.replace(/\r\n/g, "\n");
@@ -60,14 +120,29 @@ function App() {
       <div className="message-content">
         {visibleSegments.map((segment, index) => {
           if (segment.type === "code") {
+            const codeKey = `${messageIndex}-code-${index}`;
+
             return (
-              <pre
-                key={`code-${index}`}
-                className="message-code-block"
-                data-language={segment.language || undefined}
-              >
-                <code>{segment.content}</code>
-              </pre>
+              <div key={`code-${index}`} className="message-code-wrapper">
+                <div className="code-toolbar">
+                  <button
+                    type="button"
+                    className={`copy-button ${
+                      copiedCodeKey === codeKey ? "copied" : ""
+                    }`}
+                    onClick={() => handleCopyCode(segment.content, codeKey)}
+                    aria-label="Copier ce bloc de code"
+                  >
+                    {copiedCodeKey === codeKey ? "✅ Copié !" : "📋 Copier"}
+                  </button>
+                </div>
+                <pre
+                  className="message-code-block"
+                  data-language={segment.language || undefined}
+                >
+                  <code>{segment.content}</code>
+                </pre>
+              </div>
             );
           }
 
@@ -80,6 +155,14 @@ function App() {
       </div>
     );
   };
+
+  useEffect(() => {
+    return () => {
+      if (copyTimeoutRef.current) {
+        clearTimeout(copyTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const sendMessage = async () => {
     if (isLoading) return;
@@ -203,7 +286,7 @@ function App() {
             className={`message ${m.sender === "user" ? "user" : "bot"}`}
           >
             <div className="bubble">
-              {renderMessageContent(m.text)}
+              {renderMessageContent(m.text, i)}
               {m.attachments?.length > 0 && (
                 <ul className="attachment-list">
                   {m.attachments.map((file, idx) => (
