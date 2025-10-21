@@ -10,6 +10,8 @@ venv/
 
 # --- FastAPI Memory / Cache ---
 backend/memory/chroma_store/
+backend/memory/
+
 
 # --- Node / React ---
 node_modules/
