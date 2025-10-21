@@ -7,6 +7,9 @@ import sys
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from fastapi.concurrency import iterate_in_threadpool
+from starlette.background import BackgroundTask
 
 # Ensure the "backend" package can be imported when the module is executed
 # directly (e.g. via ``uvicorn main:app`` from inside the ``backend`` folder).
@@ -168,38 +171,78 @@ async def chat(
             prompt_sections.append("Nouvelle demande :\n" + text)
             prompt = "\n\n".join(prompt_sections)
 
+        response_chunks: list[str] = []
+        stream_errors: list[Exception] = []
+
+        def sync_stream():
+            try:
+                for chunk in _provider.stream_response(prompt, attachments):
+                    if chunk:
+                        response_chunks.append(chunk)
+                        yield chunk
+            except ProviderRequestError as exc:
+                stream_errors.append(exc)
+                raise
+            except Exception as exc:  # pragma: no cover - log only
+                stream_errors.append(exc)
+                raise
+
+        stream_iterator = sync_stream()
+
         try:
-            response_text = await asyncio.to_thread(
-                _provider.generate_response, prompt, attachments
-            )
+            first_chunk = await asyncio.to_thread(next, stream_iterator)
+        except StopIteration:
+            first_chunk = ""
         except ProviderRequestError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
 
-        if _memory is not None:
-            try:
-                attachment_note = ""
-                if attachments:
-                    attachment_note = "\nFichiers partagés : " + ", ".join(
-                        attachment.filename for attachment in attachments
+        async def streaming_content():
+            if first_chunk:
+                yield first_chunk
+            async for chunk in iterate_in_threadpool(stream_iterator):
+                yield chunk
+
+        def finalize() -> None:
+            if stream_errors:
+                return
+
+            response_text = "".join(response_chunks)
+            if not response_text:
+                return
+
+            if _memory is not None:
+                try:
+                    attachment_note = ""
+                    if attachments:
+                        attachment_note = "\nFichiers partagés : " + ", ".join(
+                            attachment.filename for attachment in attachments
+                        )
+                    _memory.add_memory(
+                        f"Utilisateur : {text}{attachment_note}\nJarvis : {response_text}",
+                        metadata={"source": "conversation"},
                     )
-                _memory.add_memory(
-                    f"Utilisateur : {text}{attachment_note}\nJarvis : {response_text}",
-                    metadata={"source": "conversation"},
+                except Exception as exc:  # pragma: no cover - log only
+                    print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
+
+            history_question = text
+            if attachments:
+                history_question = (
+                    f"{text}\n[Fichiers partagés : "
+                    + ", ".join(attachment.filename for attachment in attachments)
+                    + "]"
                 )
-            except Exception as exc:  # pragma: no cover - log only
-                print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
 
-        history_question = text
-        if attachments:
-            history_question = (
-                f"{text}\n[Fichiers partagés : "
-                + ", ".join(attachment.filename for attachment in attachments)
-                + "]"
-            )
+            _recent_history.append((history_question, response_text))
 
-        _recent_history.append((history_question, response_text))
+        background_task = BackgroundTask(finalize)
 
-        return {"response": response_text}
+        return StreamingResponse(
+            streaming_content(),
+            media_type="text/plain; charset=utf-8",
+            background=background_task,
+        )
 
     except HTTPException:
         raise

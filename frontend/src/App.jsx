@@ -601,6 +601,54 @@ function App() {
     });
   };
 
+  const updateConversationMessage = (conversationId, messageIndex, updater) => {
+    setConversations((previousConversations) => {
+      const existingConversation = previousConversations.find(
+        (conversation) => conversation.id === conversationId
+      );
+
+      if (!existingConversation) {
+        return previousConversations;
+      }
+
+      if (
+        messageIndex < 0 ||
+        messageIndex >= existingConversation.messages.length
+      ) {
+        return previousConversations;
+      }
+
+      const updatedMessages = existingConversation.messages.map(
+        (message, index) => {
+          if (index !== messageIndex) {
+            return message;
+          }
+
+          const previousText =
+            typeof message.text === "string" ? message.text : "";
+          const nextText =
+            typeof updater === "function" ? updater(previousText) : updater;
+
+          return {
+            ...message,
+            text: nextText,
+          };
+        }
+      );
+
+      const updatedConversation = {
+        ...existingConversation,
+        messages: updatedMessages,
+      };
+
+      const remainingConversations = previousConversations.filter(
+        (conversation) => conversation.id !== conversationId
+      );
+
+      return [updatedConversation, ...remainingConversations];
+    });
+  };
+
   const handleSelectConversation = (conversationId) => {
     if (conversationId === activeConversationId) {
       return;
@@ -842,6 +890,8 @@ function App() {
       type: file.type,
     }));
 
+    const initialMessageCount = activeConversation?.messages.length ?? 0;
+
     const userMsg = {
       sender: "user",
       text: messageText,
@@ -850,6 +900,13 @@ function App() {
 
     appendMessageToConversation(conversationIdForRequest, userMsg);
     resetComposer();
+
+    const botMessageIndex = initialMessageCount + 1;
+
+    appendMessageToConversation(conversationIdForRequest, {
+      sender: "bot",
+      text: "",
+    });
 
     try {
       setLoadingConversationIds((previousIds) => {
@@ -875,15 +932,65 @@ function App() {
         throw new Error(`Erreur serveur (${res.status})`);
       }
 
-      const data = await res.json();
-      const botMsg = { sender: "bot", text: data.response };
-      appendMessageToConversation(conversationIdForRequest, botMsg);
-    } catch {
-      const errMsg = {
-        sender: "bot",
-        text: "⚠️ Erreur : impossible de contacter le serveur.",
+      if (!res.body) {
+        throw new Error("Réponse sans flux disponible.");
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let aggregatedText = "";
+
+      const applyChunk = (chunkText) => {
+        if (!chunkText) {
+          return;
+        }
+
+        aggregatedText += chunkText;
+        updateConversationMessage(
+          conversationIdForRequest,
+          botMessageIndex,
+          (previousText) => previousText + chunkText
+        );
       };
-      appendMessageToConversation(conversationIdForRequest, errMsg);
+
+      while (true) {
+        const { value, done: readerDone } = await reader.read();
+
+        if (value) {
+          const chunkText = decoder.decode(value, { stream: true });
+          applyChunk(chunkText);
+        }
+
+        if (readerDone) {
+          break;
+        }
+      }
+
+      const finalChunk = decoder.decode();
+      applyChunk(finalChunk);
+
+      const normalizedText = aggregatedText.trim();
+
+      if (normalizedText.length === 0) {
+        updateConversationMessage(
+          conversationIdForRequest,
+          botMessageIndex,
+          "⚠️ Réponse vide reçue du serveur."
+        );
+      } else if (normalizedText !== aggregatedText) {
+        updateConversationMessage(
+          conversationIdForRequest,
+          botMessageIndex,
+          normalizedText
+        );
+      }
+    } catch (error) {
+      console.error("Erreur lors de l'envoi du message :", error);
+      updateConversationMessage(
+        conversationIdForRequest,
+        botMessageIndex,
+        "⚠️ Erreur : impossible de contacter le serveur."
+      );
     } finally {
       setLoadingConversationIds((previousIds) =>
         previousIds.filter((id) => id !== conversationIdForRequest)
