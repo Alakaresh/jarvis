@@ -513,6 +513,7 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const [auditInProgress, setAuditInProgress] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -891,6 +892,75 @@ function App() {
     }
   };
 
+  const runSelfAudit = async () => {
+    if (auditInProgress || isActiveConversationLoading) {
+      return;
+    }
+
+    const conversationIdForAudit = activeConversation?.id;
+
+    if (!conversationIdForAudit) {
+      return;
+    }
+
+    const commandText = "Fais une auto-revue de ton code.";
+    const userMsg = { sender: "user", text: commandText, attachments: [] };
+
+    appendMessageToConversation(conversationIdForAudit, userMsg);
+
+    setAuditInProgress(true);
+    setLoadingConversationIds((previousIds) => {
+      if (previousIds.includes(conversationIdForAudit)) {
+        return previousIds;
+      }
+
+      return [...previousIds, conversationIdForAudit];
+    });
+
+    try {
+      const res = await fetch("http://127.0.0.1:8000/self-review", {
+        method: "POST",
+      });
+
+      if (!res.ok) {
+        throw new Error(`Erreur serveur (${res.status})`);
+      }
+
+      const data = await res.json();
+      const reportText =
+        (typeof data.report === "string" && data.report.trim()) ||
+        (data.audit &&
+          typeof data.audit.report === "string" &&
+          data.audit.report.trim()) ||
+        (typeof data.response === "string" && data.response.trim()) ||
+        "";
+
+      if (!reportText) {
+        throw new Error("Réponse d'audit vide");
+      }
+
+      const botMsg = { sender: "bot", text: reportText };
+      appendMessageToConversation(conversationIdForAudit, botMsg);
+    } catch (error) {
+      console.error("Erreur pendant l'auto-audit", error);
+
+      const errorMessage =
+        error instanceof Error && error.message
+          ? `⚠️ Erreur : ${error.message}`
+          : "⚠️ Erreur : impossible de générer l'audit pour le moment.";
+
+      appendMessageToConversation(conversationIdForAudit, {
+        sender: "bot",
+        text: errorMessage,
+      });
+    } finally {
+      setLoadingConversationIds((previousIds) =>
+        previousIds.filter((id) => id !== conversationIdForAudit)
+      );
+      setAuditInProgress(false);
+    }
+  };
+
   const handleFileSelection = (files) => {
     const fileArray = Array.from(files || []);
     if (fileArray.length === 0) return;
@@ -1033,7 +1103,20 @@ function App() {
       </aside>
       <div className="app-container">
         <header className="app-header">
-          🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
+          <span className="app-header-title">
+            🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
+          </span>
+          <button
+            type="button"
+            className="self-review-button"
+            onClick={runSelfAudit}
+            disabled={auditInProgress || isActiveConversationLoading}
+            aria-busy={auditInProgress}
+            aria-label="Lancer un audit automatique du code"
+            title="Demander à Jarvis d'analyser son propre code"
+          >
+            {auditInProgress ? "Audit en cours…" : "🛡️ Auto-audit"}
+          </button>
         </header>
 
         <main ref={chatRef} className="chat-container" aria-live="polite">
