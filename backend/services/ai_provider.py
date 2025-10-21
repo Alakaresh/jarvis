@@ -79,40 +79,64 @@ class OpenAIProvider:
                         file_payload["filename"] = attachment.filename
                     input_content.append(file_payload)
 
-            response = self.client.responses.create(
-                model=self.model,
-                input=[
-                    {
-                        "role": "user",
-                        "content": input_content,
-                    }
-                ],
-                instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
-            )
+            collected_chunks: list[str] = []
+            final_response = None
 
-            usage = getattr(response, "usage", None)
-            if usage is not None:
-                input_tokens = getattr(usage, "input_tokens", None)
-                if input_tokens is not None:
-                    print(f"🧮 Tokens envoyés au modèle : {input_tokens}")
+            try:
+                with self.client.responses.stream(
+                    model=self.model,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": input_content,
+                        }
+                    ],
+                    instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
+                ) as stream:
+                    for event in stream:
+                        event_type = getattr(event, "type", "")
+                        if event_type == "response.output_text.delta":
+                            delta = getattr(event, "delta", "")
+                            if delta:
+                                collected_chunks.append(delta)
+                        elif event_type == "response.error":
+                            error = getattr(event, "error", None)
+                            message = getattr(error, "message", None)
+                            raise ProviderRequestError(message or "OpenAI streaming error")
 
-            result_text = response.output_text.strip()
-            if not result_text:
-                for output in getattr(response, "output", []):
-                    if getattr(output, "type", None) == "message":
-                        for content in getattr(output, "content", []):
-                            if getattr(content, "type", None) == "output_text":
-                                maybe_text = getattr(content, "text", "").strip()
-                                if maybe_text:
-                                    result_text = maybe_text
-                                    break
-                        if result_text:
-                            break
+                    final_response = getattr(stream, "final_response", None)
+            except ProviderRequestError:
+                raise
+
+            result_text = "".join(collected_chunks).strip()
+
+            if not result_text and final_response is not None:
+                result_text = getattr(final_response, "output_text", "").strip()
+                if not result_text:
+                    for output in getattr(final_response, "output", []):
+                        if getattr(output, "type", None) == "message":
+                            for content in getattr(output, "content", []):
+                                if getattr(content, "type", None) == "output_text":
+                                    maybe_text = getattr(content, "text", "").strip()
+                                    if maybe_text:
+                                        result_text = maybe_text
+                                        break
+                            if result_text:
+                                break
 
             if not result_text:
                 raise ProviderRequestError("Empty response received from OpenAI")
 
+            if final_response is not None:
+                usage = getattr(final_response, "usage", None)
+                if usage is not None:
+                    input_tokens = getattr(usage, "input_tokens", None)
+                    if input_tokens is not None:
+                        print(f"🧮 Tokens envoyés au modèle : {input_tokens}")
+
             return result_text
+        except ProviderRequestError:
+            raise
         except Exception as exc:
             print("❌ Erreur OpenAI:", exc)
             raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
