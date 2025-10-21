@@ -89,6 +89,8 @@
   flex-direction: column;
   gap: 10px;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   background: radial-gradient(circle at 20% 20%, rgba(30, 64, 175, 0.15), transparent)
       no-repeat,
     linear-gradient(145deg, rgba(15, 23, 42, 0.92), rgba(11, 16, 29, 0.85));
@@ -179,6 +181,8 @@
 .message-code-block {
   margin: 0;
   overflow-x: auto;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 18px 20px;
   border-radius: 14px;
   background: linear-gradient(160deg, rgba(15, 23, 42, 0.95), rgba(12, 18, 33, 0.88));
