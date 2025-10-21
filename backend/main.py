@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from pathlib import Path
 import sys
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 # Ensure the "backend" package can be imported when the module is executed
 # directly (e.g. via ``uvicorn main:app`` from inside the ``backend`` folder).
@@ -24,6 +24,7 @@ else:
     _memory_import_error = None
 from backend.services.ai_provider import (
     AIProvider,
+    Attachment,
     ProviderConfigurationError,
     ProviderRequestError,
     create_provider,
@@ -39,10 +40,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-class Message(BaseModel):
-    text: str
 
 
 _provider: AIProvider | None = None
@@ -94,7 +91,9 @@ _initialise_memory()
 
 
 @app.post("/chat")
-def chat(msg: Message):
+async def chat(
+    text: str = Form(...), files: list[UploadFile] | None = File(default=None)
+):
     try:
         if _provider_error is not None:
             raise HTTPException(
@@ -105,12 +104,36 @@ def chat(msg: Message):
         if _provider is None:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
 
-        prompt = msg.text
+        prompt = text
+
+        uploads = files or []
+        attachments: list[Attachment] = []
+        for upload in uploads:
+            content: bytes | None = None
+            try:
+                content = await upload.read()
+            except Exception as exc:
+                filename = upload.filename or "(inconnu)"
+                print(f"⚠️ Lecture impossible pour le fichier '{filename}':", exc)
+                continue
+            finally:
+                await upload.close()
+
+            if not content:
+                continue
+
+            attachments.append(
+                Attachment(
+                    filename=upload.filename or "pièce-jointe",
+                    content=content,
+                    content_type=upload.content_type,
+                )
+            )
 
         relevant_memories: list[str] = []
         if _memory is not None:
             try:
-                relevant_memories = [memory for memory in _memory.retrieve_relevant(msg.text) if memory]
+                relevant_memories = [memory for memory in _memory.retrieve_relevant(text) if memory]
             except Exception as exc:  # pragma: no cover - log only
                 print("⚠️ Impossible de récupérer la mémoire vectorielle:", exc)
 
@@ -134,25 +157,47 @@ def chat(msg: Message):
                 f"{memories_block}"
             )
 
+        if attachments:
+            attachment_lines = "\n".join(f"- {attachment.filename}" for attachment in attachments)
+            prompt_sections.append(
+                "L'utilisateur a fourni des fichiers en pièces jointes. Utilise-les dans ta réponse si pertinent :\n"
+                f"{attachment_lines}"
+            )
+
         if prompt_sections:
-            prompt_sections.append("Nouvelle demande :\n" + msg.text)
+            prompt_sections.append("Nouvelle demande :\n" + text)
             prompt = "\n\n".join(prompt_sections)
 
         try:
-            response_text = _provider.generate_response(prompt)
+            response_text = await asyncio.to_thread(
+                _provider.generate_response, prompt, attachments
+            )
         except ProviderRequestError as exc:
             raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
 
         if _memory is not None:
             try:
+                attachment_note = ""
+                if attachments:
+                    attachment_note = "\nFichiers partagés : " + ", ".join(
+                        attachment.filename for attachment in attachments
+                    )
                 _memory.add_memory(
-                    f"Utilisateur : {msg.text}\nJarvis : {response_text}",
+                    f"Utilisateur : {text}{attachment_note}\nJarvis : {response_text}",
                     metadata={"source": "conversation"},
                 )
             except Exception as exc:  # pragma: no cover - log only
                 print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
 
-        _recent_history.append((msg.text, response_text))
+        history_question = text
+        if attachments:
+            history_question = (
+                f"{text}\n[Fichiers partagés : "
+                + ", ".join(attachment.filename for attachment in attachments)
+                + "]"
+            )
+
+        _recent_history.append((history_question, response_text))
 
         return {"response": response_text}
 
