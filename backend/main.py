@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from pathlib import Path
 import sys
@@ -29,6 +30,7 @@ from backend.services.ai_provider import (
     ProviderRequestError,
     create_provider,
 )
+from backend.services.self_review import SelfReviewError, run_self_review
 
 
 app = FastAPI()
@@ -47,6 +49,15 @@ _provider_error: ProviderConfigurationError | None = None
 _memory: VectorMemory | None = None
 _RECENT_HISTORY_LIMIT = 5
 _recent_history: deque[tuple[str, str]] = deque(maxlen=_RECENT_HISTORY_LIMIT)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_SELF_REVIEW_TRIGGERS = (
+    "auto-revue",
+    "auto revue",
+    "auto-analyse",
+    "auto analyse",
+    "self review",
+    "self-review",
+)
 
 
 def _initialise_provider() -> None:
@@ -90,6 +101,24 @@ def _initialise_memory() -> None:
 _initialise_memory()
 
 
+async def _execute_self_review() -> dict[str, str]:
+    if _provider is None:
+        raise SelfReviewError("Le provider d'IA n'est pas initialisé.")
+
+    report = await asyncio.to_thread(run_self_review, _provider, _PROJECT_ROOT)
+
+    if _memory is not None:
+        try:
+            _memory.add_memory(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                metadata={"source": "self_review"},
+            )
+        except Exception as exc:  # pragma: no cover - log only
+            print("⚠️ Impossible d'enregistrer l'audit dans la mémoire:", exc)
+
+    return report
+
+
 @app.post("/chat")
 async def chat(
     text: str = Form(...), files: list[UploadFile] | None = File(default=None)
@@ -103,6 +132,17 @@ async def chat(
 
         if _provider is None:
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
+
+        normalized_request = text.strip().lower()
+        if any(trigger in normalized_request for trigger in _SELF_REVIEW_TRIGGERS):
+            try:
+                audit_report = await _execute_self_review()
+            except SelfReviewError as exc:
+                raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+
+            formatted_report = json.dumps(audit_report, ensure_ascii=False, indent=2)
+            _recent_history.append((text, formatted_report))
+            return {"response": formatted_report}
 
         prompt = text
 
@@ -209,6 +249,21 @@ async def chat(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/self-review")
+async def trigger_self_review() -> dict[str, dict[str, str]]:
+    if _provider_error is not None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(_provider_error),
+        )
+
+    try:
+        report = await _execute_self_review()
+    except SelfReviewError as exc:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+
+    return {"report": report}
 
 
 @app.get("/")
