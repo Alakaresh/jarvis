@@ -9,7 +9,7 @@ venv/
 *.pyo
 
 # --- FastAPI Memory / Cache ---
-backend/memory/chroma/
+backend/memory/chroma_store/
 
 # --- Node / React ---
 node_modules/
