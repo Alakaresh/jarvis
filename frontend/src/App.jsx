@@ -60,6 +60,14 @@ const PROTOCOL_KEYWORDS = new Set([
   "grpc",
 ]);
 
+const CONSTANT_KEYWORDS = new Set([
+  "true",
+  "false",
+  "none",
+  "null",
+  "undefined",
+]);
+
 const GENERAL_KEYWORDS = new Set([
   "const",
   "let",
@@ -81,11 +89,6 @@ const GENERAL_KEYWORDS = new Set([
   "finally",
   "raise",
   "except",
-  "true",
-  "false",
-  "none",
-  "null",
-  "undefined",
   "switch",
   "case",
   "break",
@@ -111,6 +114,7 @@ const GENERAL_KEYWORDS = new Set([
 const KEYWORD_PATTERN = Array.from(
   new Set([
     ...GENERAL_KEYWORDS,
+    ...CONSTANT_KEYWORDS,
     ...STATUS_KEYWORDS,
     ...PROCESS_KEYWORDS,
     ...PROTOCOL_KEYWORDS,
@@ -123,12 +127,26 @@ const regexParts = [
   String.raw`("(?:\\.|[^"\\])*")`,
   String.raw`('(?:\\.|[^'\\])*')`,
   String.raw`(\\b\\d{1,3}(?:\\.\\d{1,3}){3}(?::\\d{1,5})?\\b)`,
-  String.raw`(0x[\\da-fA-F]+)`,
+  String.raw`(0x[\\da-fA-F]+\\b)`,
+  String.raw`(0b[01_]+\\b)`,
+  String.raw`(0o[0-7_]+\\b)`,
   String.raw`(\\b\\d+(?:\\.\\d+)?\\b)`,
   String.raw`(\\b(?:${KEYWORD_PATTERN})\\b)`,
+  String.raw`([+\-*/%=&|^!<>?:]+)`,
+  String.raw`([\\[\\]{}()])`,
+  String.raw`([.,;])`,
 ];
 
 const HIGHLIGHT_REGEX = new RegExp(regexParts.join("|"), "gi");
+
+const HASH_COMMENT_LANGUAGES = new Set([
+  "python",
+  "ruby",
+  "bash",
+  "sh",
+  "zsh",
+  "powershell",
+]);
 
 const normaliseLanguage = (language) => {
   if (!language) return undefined;
@@ -157,59 +175,177 @@ const escapeHtml = (value) =>
 const highlightCommentLine = (line) =>
   `<span class="token-comment">${escapeHtml(line)}</span>`;
 
-const highlightTokens = (line) =>
-  escapeHtml(line).replace(
-    HIGHLIGHT_REGEX,
-    (
-      match,
+const findCommentStart = (line, canonicalLanguage) => {
+  const checkHash = canonicalLanguage
+    ? HASH_COMMENT_LANGUAGES.has(canonicalLanguage)
+    : false;
+  const checkSlashSlash = canonicalLanguage
+    ? isCStyleLanguage(canonicalLanguage)
+    : false;
+
+  if (!checkHash && !checkSlashSlash) {
+    return -1;
+  }
+
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inBacktick = false;
+  let escapeNext = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      if (inSingleQuote || inDoubleQuote || inBacktick) {
+        escapeNext = true;
+      }
+      continue;
+    }
+
+    if (char === "'" && !inDoubleQuote && !inBacktick) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (char === '"' && !inSingleQuote && !inBacktick) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (char === "`" && !inSingleQuote && !inDoubleQuote) {
+      inBacktick = !inBacktick;
+      continue;
+    }
+
+    if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
+      if (checkSlashSlash && char === "/" && line[index + 1] === "/") {
+        return index;
+      }
+
+      if (checkHash && char === "#") {
+        return index;
+      }
+    }
+  }
+
+  return -1;
+};
+
+const highlightTokensInternal = (line) => {
+  if (!line) {
+    return "";
+  }
+
+  let highlighted = "";
+  let lastIndex = 0;
+
+  HIGHLIGHT_REGEX.lastIndex = 0;
+  let match;
+
+  while ((match = HIGHLIGHT_REGEX.exec(line)) !== null) {
+    const [
+      fullMatch,
       doubleQuoted,
       singleQuoted,
       ipAddress,
       hexNumber,
+      binaryNumber,
+      octalNumber,
       numberLiteral,
-      keyword
-    ) => {
-      if (doubleQuoted) {
-        return `<span class="token-string">${doubleQuoted}</span>`;
-      }
+      keyword,
+      operatorToken,
+      bracketToken,
+      punctuationToken,
+    ] = match;
 
-      if (singleQuoted) {
-        return `<span class="token-string">${singleQuoted}</span>`;
-      }
+    const matchIndex = match.index;
 
-      if (ipAddress) {
-        return `<span class="token-ip">${ipAddress}</span>`;
-      }
-
-      if (hexNumber) {
-        return `<span class="token-number">${hexNumber}</span>`;
-      }
-
-      if (numberLiteral) {
-        return `<span class="token-number">${numberLiteral}</span>`;
-      }
-
-      if (keyword) {
-        const lowerKeyword = keyword.toLowerCase();
-
-        if (STATUS_KEYWORDS.has(lowerKeyword)) {
-          return `<span class="token-status">${keyword}</span>`;
-        }
-
-        if (PROCESS_KEYWORDS.has(lowerKeyword)) {
-          return `<span class="token-process">${keyword}</span>`;
-        }
-
-        if (PROTOCOL_KEYWORDS.has(lowerKeyword)) {
-          return `<span class="token-protocol">${keyword}</span>`;
-        }
-
-        return `<span class="token-keyword">${keyword}</span>`;
-      }
-
-      return match;
+    if (matchIndex > lastIndex) {
+      highlighted += escapeHtml(line.slice(lastIndex, matchIndex));
     }
-  );
+
+    let tokenClass = null;
+    let tokenContent =
+      doubleQuoted ||
+      singleQuoted ||
+      ipAddress ||
+      hexNumber ||
+      binaryNumber ||
+      octalNumber ||
+      numberLiteral ||
+      keyword ||
+      operatorToken ||
+      bracketToken ||
+      punctuationToken ||
+      fullMatch;
+
+    if (doubleQuoted || singleQuoted) {
+      tokenClass = "token-string";
+    } else if (ipAddress) {
+      tokenClass = "token-ip";
+    } else if (hexNumber || binaryNumber || octalNumber || numberLiteral) {
+      tokenClass = "token-number";
+    } else if (keyword) {
+      const lowerKeyword = keyword.toLowerCase();
+
+      if (STATUS_KEYWORDS.has(lowerKeyword)) {
+        tokenClass = "token-status";
+      } else if (PROCESS_KEYWORDS.has(lowerKeyword)) {
+        tokenClass = "token-process";
+      } else if (PROTOCOL_KEYWORDS.has(lowerKeyword)) {
+        tokenClass = "token-protocol";
+      } else if (CONSTANT_KEYWORDS.has(lowerKeyword)) {
+        tokenClass = "token-constant";
+      } else {
+        tokenClass = "token-keyword";
+      }
+    } else if (operatorToken) {
+      tokenClass = "token-operator";
+    } else if (bracketToken || punctuationToken) {
+      tokenClass = "token-punctuation";
+    }
+
+    if (tokenClass) {
+      highlighted += `<span class="${tokenClass}">${escapeHtml(
+        tokenContent
+      )}</span>`;
+    } else {
+      highlighted += escapeHtml(fullMatch);
+    }
+
+    lastIndex = matchIndex + fullMatch.length;
+  }
+
+  if (lastIndex < line.length) {
+    highlighted += escapeHtml(line.slice(lastIndex));
+  }
+
+  return highlighted;
+};
+
+const highlightTokens = (line, canonicalLanguage) => {
+  if (!line) {
+    return "";
+  }
+
+  const commentStart = findCommentStart(line, canonicalLanguage);
+
+  if (commentStart !== -1) {
+    const codePart = line.slice(0, commentStart);
+    const commentPart = line.slice(commentStart);
+    const highlightedCode =
+      commentStart > 0 ? highlightTokensInternal(codePart) : "";
+
+    return `${highlightedCode}${highlightCommentLine(commentPart)}`;
+  }
+
+  return highlightTokensInternal(line);
+};
 
 const highlightCode = (code, language) => {
   if (!code) {
@@ -246,7 +382,7 @@ const highlightCode = (code, language) => {
         return highlightCommentLine(segment);
       }
 
-      return highlightTokens(segment);
+      return highlightTokens(segment, canonicalLanguage);
     })
     .join("");
 };
