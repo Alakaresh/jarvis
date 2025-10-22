@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 # Ensure the "backend" package can be imported when the module is executed
@@ -92,7 +93,9 @@ _initialise_memory()
 
 @app.post("/chat")
 async def chat(
-    text: str = Form(...), files: list[UploadFile] | None = File(default=None)
+    text: str = Form(...),
+    files: list[UploadFile] | None = File(default=None),
+    stream: bool = Form(default=False),
 ):
     try:
         if _provider_error is not None:
@@ -105,6 +108,7 @@ async def chat(
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "AI provider not initialised")
 
         prompt = text
+        stream_requested = bool(stream)
 
         uploads = files or []
         attachments: list[Attachment] = []
@@ -168,27 +172,6 @@ async def chat(
             prompt_sections.append("Nouvelle demande :\n" + text)
             prompt = "\n\n".join(prompt_sections)
 
-        try:
-            response_text = await asyncio.to_thread(
-                _provider.generate_response, prompt, attachments
-            )
-        except ProviderRequestError as exc:
-            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
-
-        if _memory is not None:
-            try:
-                attachment_note = ""
-                if attachments:
-                    attachment_note = "\nFichiers partagés : " + ", ".join(
-                        attachment.filename for attachment in attachments
-                    )
-                _memory.add_memory(
-                    f"Utilisateur : {text}{attachment_note}\nJarvis : {response_text}",
-                    metadata={"source": "conversation"},
-                )
-            except Exception as exc:  # pragma: no cover - log only
-                print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
-
         history_question = text
         if attachments:
             history_question = (
@@ -197,7 +180,80 @@ async def chat(
                 + "]"
             )
 
-        _recent_history.append((history_question, response_text))
+        def handle_response(response_text: str) -> None:
+            if _memory is not None:
+                try:
+                    attachment_note = ""
+                    if attachments:
+                        attachment_note = "\nFichiers partagés : " + ", ".join(
+                            attachment.filename for attachment in attachments
+                        )
+                    _memory.add_memory(
+                        f"Utilisateur : {text}{attachment_note}\nJarvis : {response_text}",
+                        metadata={"source": "conversation"},
+                    )
+                except Exception as exc:  # pragma: no cover - log only
+                    print("⚠️ Impossible d'enregistrer la mémoire vectorielle:", exc)
+
+            _recent_history.append((history_question, response_text))
+
+        if stream_requested:
+
+            async def streaming_generator():
+                loop = asyncio.get_running_loop()
+                queue: asyncio.Queue[tuple[str | None, Exception | None]] = asyncio.Queue()
+
+                def produce() -> None:
+                    try:
+                        for chunk in _provider.stream_response(prompt, attachments):
+                            asyncio.run_coroutine_threadsafe(queue.put((chunk, None)), loop)
+                    except Exception as exc:
+                        asyncio.run_coroutine_threadsafe(queue.put((None, exc)), loop)
+                    finally:
+                        asyncio.run_coroutine_threadsafe(queue.put((None, None)), loop)
+
+                producer_task = asyncio.create_task(asyncio.to_thread(produce))
+                final_parts: list[str] = []
+                cancelled = False
+
+                try:
+                    while True:
+                        chunk, error = await queue.get()
+                        if error is not None:
+                            await producer_task
+                            if isinstance(error, ProviderRequestError):
+                                raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(error)) from error
+                            raise HTTPException(
+                                status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)
+                            ) from error
+                        if chunk is None:
+                            break
+                        if chunk:
+                            final_parts.append(chunk)
+                            yield chunk
+                except asyncio.CancelledError:
+                    cancelled = True
+                finally:
+                    await producer_task
+
+                if cancelled:
+                    return
+
+                response_text = "".join(final_parts).strip() or "(Réponse vide)"
+                handle_response(response_text)
+
+            return StreamingResponse(
+                streaming_generator(), media_type="text/plain; charset=utf-8"
+            )
+
+        try:
+            response_text = await asyncio.to_thread(
+                _provider.generate_response, prompt, attachments
+            )
+        except ProviderRequestError as exc:
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc
+
+        handle_response(response_text)
 
         return {"response": response_text}
 
