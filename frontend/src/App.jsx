@@ -681,6 +681,8 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const [isVoiceReady, setIsVoiceReady] = useState(false);
+  const [isVoiceActivating, setIsVoiceActivating] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -689,6 +691,7 @@ function App() {
   const audioContextRef = useRef(null);
   const audioPlaybackTimeRef = useRef(0);
   const audioObjectUrlsRef = useRef(new Set());
+  const voiceActivationPromiseRef = useRef(null);
 
   const clearCopyFeedback = () => {
     if (copyTimeoutRef.current) {
@@ -739,6 +742,56 @@ function App() {
     }
 
     return audioContextRef.current;
+  };
+
+  const handleActivateVoice = async () => {
+    if (voiceActivationPromiseRef.current) {
+      return voiceActivationPromiseRef.current;
+    }
+
+    const activationPromise = (async () => {
+      setIsVoiceActivating(true);
+
+      try {
+        const context = await ensureAudioContext();
+
+        if (!context || context.state === "closed") {
+          setIsVoiceReady(false);
+          return null;
+        }
+
+        if (context.state === "suspended") {
+          try {
+            await context.resume();
+          } catch (error) {
+            console.warn("Impossible de reprendre l'AudioContext", error);
+            setIsVoiceReady(false);
+            return null;
+          }
+        }
+
+        const currentTime =
+          typeof context.currentTime === "number" ? context.currentTime : 0;
+        const previousPlayback =
+          typeof audioPlaybackTimeRef.current === "number"
+            ? audioPlaybackTimeRef.current
+            : 0;
+
+        audioPlaybackTimeRef.current = Math.max(previousPlayback, currentTime);
+        setIsVoiceReady(true);
+        return context;
+      } catch (error) {
+        console.warn("Impossible d'activer la lecture audio", error);
+        setIsVoiceReady(false);
+        return null;
+      } finally {
+        setIsVoiceActivating(false);
+        voiceActivationPromiseRef.current = null;
+      }
+    })();
+
+    voiceActivationPromiseRef.current = activationPromise;
+    return activationPromise;
   };
 
   const playPcmChunk = async (
@@ -1170,7 +1223,9 @@ function App() {
         } catch (error) {
           console.warn("Impossible de fermer l'AudioContext", error);
         }
+        audioContextRef.current = null;
       }
+      voiceActivationPromiseRef.current = null;
     };
   }, []);
 
@@ -1236,7 +1291,15 @@ function App() {
       };
       appendMessageToConversation(conversationIdForRequest, placeholderBotMessage);
 
-      const audioContext = await ensureAudioContext();
+      let audioContext = null;
+
+      if (!isVoiceReady) {
+        audioContext = await handleActivateVoice();
+      }
+
+      if (!audioContext) {
+        audioContext = await ensureAudioContext();
+      }
       if (audioContext) {
         const previousPlayback =
           typeof audioPlaybackTimeRef.current === "number"
@@ -1246,6 +1309,9 @@ function App() {
           previousPlayback,
           audioContext.currentTime
         );
+        if (audioContext.state !== "closed") {
+          setIsVoiceReady(true);
+        }
       }
 
       const formData = new FormData();
@@ -1705,6 +1771,26 @@ function App() {
                 onChange={handleFileChange}
               />
             </label>
+            <button
+              type="button"
+              className={`voice-toggle-button${
+                isVoiceReady ? " ready" : ""
+              }${isVoiceActivating ? " activating" : ""}`}
+              onClick={handleActivateVoice}
+              aria-pressed={isVoiceReady}
+              aria-label={
+                isVoiceReady
+                  ? "Lecture audio activée"
+                  : "Activer la lecture audio"
+              }
+              disabled={isVoiceActivating}
+            >
+              {isVoiceActivating
+                ? "⏳ Activation..."
+                : isVoiceReady
+                ? "🔊 Audio prêt"
+                : "▶️ Activer la voix"}
+            </button>
             <input
               type="text"
               value={input}
