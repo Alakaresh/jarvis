@@ -148,6 +148,36 @@ const HASH_COMMENT_LANGUAGES = new Set([
   "powershell",
 ]);
 
+const VOICE_MODE_BROWSER = "browser";
+const VOICE_MODE_FALLBACK = "fallback";
+const VOICE_MODE_UNSUPPORTED = "unsupported";
+
+const guessExtensionFromMime = (mimeType) => {
+  if (typeof mimeType !== "string") {
+    return "webm";
+  }
+
+  const lower = mimeType.toLowerCase();
+
+  if (lower.includes("ogg")) {
+    return "ogg";
+  }
+
+  if (lower.includes("mpeg")) {
+    return "mp3";
+  }
+
+  if (lower.includes("mp4") || lower.includes("m4a")) {
+    return "m4a";
+  }
+
+  if (lower.includes("wav")) {
+    return "wav";
+  }
+
+  return "webm";
+};
+
 const normaliseLanguage = (language) => {
   if (!language) return undefined;
   const trimmed = language.trim().toLowerCase();
@@ -530,6 +560,7 @@ function App() {
   const [activeConversationId, setActiveConversationId] = useState(1);
   const [loadingConversationIds, setLoadingConversationIds] = useState([]);
   const [selectedFiles, setSelectedFiles] = useState([]);
+  const selectedFilesRef = useRef(selectedFiles);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const [isVoiceSupported, setIsVoiceSupported] = useState(false);
@@ -543,58 +574,301 @@ function App() {
   const copyTimeoutRef = useRef(null);
   const recognitionRef = useRef(null);
   const voiceCaptureStateRef = useRef({ base: "", final: "" });
+  const voiceModeRef = useRef(VOICE_MODE_UNSUPPORTED);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const fallbackMimeTypeRef = useRef("audio/webm");
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const sendMessageRef = useRef(async () => {});
 
-  const stopVoiceRecognition = () => {
-    const recognition = recognitionRef.current;
+  const cleanupMediaStream = () => {
+    const stream = mediaStreamRef.current;
 
-    if (!recognition) {
-      return;
+    if (stream) {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.warn("Impossible d'arrêter une piste audio", error);
+        }
+      });
     }
 
-    try {
-      recognition.stop();
-    } catch (error) {
-      if (error?.name !== "InvalidStateError") {
-        console.warn("Impossible d'arrêter la dictée vocale", error);
-      }
-    }
+    mediaStreamRef.current = null;
   };
 
-  const startVoiceRecognition = () => {
-    const recognition = recognitionRef.current;
-
-    if (!recognition || !isVoiceSupported) {
+  const processRecordedAudio = async (chunks, mimeType) => {
+    if (!Array.isArray(chunks) || chunks.length === 0) {
+      setVoiceError("Aucun son détecté. Réessaie.");
       return;
     }
 
-    voiceCaptureStateRef.current = {
-      base: input,
-      final: "",
-    };
+    const safeMimeType = typeof mimeType === "string" && mimeType
+      ? mimeType
+      : fallbackMimeTypeRef.current;
+    const blob = new Blob(chunks, { type: safeMimeType });
+    const extension = guessExtensionFromMime(safeMimeType);
+    const formData = new FormData();
+    formData.append("audio", blob, `dictation.${extension}`);
 
+    setIsTranscribingAudio(true);
     setVoiceError("");
 
     try {
-      recognition.start();
-    } catch (error) {
-      if (error?.name !== "InvalidStateError") {
-        console.error("Impossible de démarrer la dictée vocale", error);
-        setVoiceError(
-          "Impossible de démarrer la dictée vocale. Vérifie ton micro."
-        );
+      const response = await fetch("http://127.0.0.1:8000/transcribe-audio", {
+        method: "POST",
+        body: formData,
+      });
+
+      const contentType = response.headers.get("content-type") || "";
+      const isJson = contentType.includes("application/json");
+      let payload = null;
+
+      if (isJson) {
+        try {
+          payload = await response.json();
+        } catch (parseError) {
+          if (response.ok) {
+            throw new Error("Réponse de transcription invalide.");
+          }
+        }
       }
+
+      if (!response.ok) {
+        const detail =
+          (payload && typeof payload.detail === "string" && payload.detail) ||
+          `Erreur serveur (${response.status})`;
+        throw new Error(detail);
+      }
+
+      const transcript =
+        payload && typeof payload.text === "string"
+          ? payload.text.trim()
+          : "";
+
+      if (!transcript) {
+        setVoiceError("La transcription est vide.");
+        return;
+      }
+
+      let combinedText = "";
+      setInput((previousInput) => {
+        combinedText = joinWithSpace(previousInput, transcript);
+        return combinedText;
+      });
+      setVoiceError("");
+
+      const hasVoiceContent =
+        typeof combinedText === "string" && combinedText.trim().length > 0;
+      const hasAttachments = selectedFilesRef.current.length > 0;
+
+      if (hasVoiceContent || hasAttachments) {
+        try {
+          await sendMessageRef.current(combinedText);
+        } catch (sendError) {
+          console.error(
+            "Impossible d'envoyer automatiquement le message vocal",
+            sendError
+          );
+        }
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message || "Impossible de transcrire l'audio."
+          : "Impossible de transcrire l'audio.";
+      console.error("Impossible de transcrire l'audio", error);
+      setVoiceError(message);
+    } finally {
+      setIsTranscribingAudio(false);
     }
   };
 
-  const toggleVoiceRecognition = () => {
+  const stopVoiceRecognition = async () => {
     if (!isVoiceSupported) {
       return;
     }
 
+    if (voiceModeRef.current === VOICE_MODE_BROWSER) {
+      const recognition = recognitionRef.current;
+
+      if (!recognition) {
+        return;
+      }
+
+      try {
+        recognition.stop();
+      } catch (error) {
+        if (error?.name !== "InvalidStateError") {
+          console.warn("Impossible d'arrêter la dictée vocale", error);
+        }
+      }
+
+      return;
+    }
+
+    if (voiceModeRef.current === VOICE_MODE_FALLBACK) {
+      const recorder = mediaRecorderRef.current;
+
+      if (recorder && recorder.state !== "inactive") {
+        try {
+          recorder.stop();
+        } catch (error) {
+          if (error?.name !== "InvalidStateError") {
+            console.warn("Impossible d'arrêter l'enregistrement audio", error);
+          }
+        }
+      } else {
+        cleanupMediaStream();
+        mediaRecorderRef.current = null;
+        audioChunksRef.current = [];
+        setIsListening(false);
+      }
+    }
+  };
+
+  const selectRecorderMimeType = () => {
+    if (typeof window === "undefined" || typeof window.MediaRecorder === "undefined") {
+      return null;
+    }
+
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/ogg;codecs=opus",
+      "audio/webm",
+      "audio/ogg",
+      "audio/mp4",
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        if (window.MediaRecorder.isTypeSupported(candidate)) {
+          return candidate;
+        }
+      } catch (error) {
+        console.warn("Type d'enregistrement audio non supporté", candidate, error);
+      }
+    }
+
+    return null;
+  };
+
+  const startVoiceRecognition = async () => {
+    if (!isVoiceSupported) {
+      return;
+    }
+
+    if (voiceModeRef.current === VOICE_MODE_BROWSER) {
+      const recognition = recognitionRef.current;
+
+      if (!recognition) {
+        return;
+      }
+
+      voiceCaptureStateRef.current = {
+        base: input,
+        final: "",
+      };
+
+      setVoiceError("");
+
+      try {
+        recognition.start();
+      } catch (error) {
+        if (error?.name !== "InvalidStateError") {
+          console.error("Impossible de démarrer la dictée vocale", error);
+          setVoiceError(
+            "Impossible de démarrer la dictée vocale. Vérifie ton micro."
+          );
+        }
+      }
+
+      return;
+    }
+
+    if (voiceModeRef.current === VOICE_MODE_FALLBACK) {
+      if (
+        typeof navigator === "undefined" ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getUserMedia !== "function"
+      ) {
+        setVoiceError("Microphone inaccessible dans ce navigateur.");
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaStreamRef.current = stream;
+        const mimeType = selectRecorderMimeType();
+        if (mimeType) {
+          fallbackMimeTypeRef.current = mimeType;
+        }
+
+        const options = mimeType ? { mimeType } : undefined;
+        const recorder = new window.MediaRecorder(stream, options);
+        mediaRecorderRef.current = recorder;
+        audioChunksRef.current = [];
+        setVoiceError("");
+
+        recorder.ondataavailable = (event) => {
+          if (event?.data && event.data.size > 0) {
+            audioChunksRef.current.push(event.data);
+          }
+        };
+
+        recorder.onerror = (event) => {
+          console.error("Erreur pendant l'enregistrement audio", event?.error ?? event);
+          audioChunksRef.current = [];
+          cleanupMediaStream();
+          mediaRecorderRef.current = null;
+          setIsListening(false);
+          setVoiceError("Erreur pendant l'enregistrement audio.");
+        };
+
+        recorder.onstart = () => {
+          setIsListening(true);
+        };
+
+        recorder.onstop = () => {
+          const recordedChunks = audioChunksRef.current.slice();
+          audioChunksRef.current = [];
+          cleanupMediaStream();
+          mediaRecorderRef.current = null;
+          setIsListening(false);
+          const recorderMime = recorder.mimeType || fallbackMimeTypeRef.current;
+          processRecordedAudio(recordedChunks, recorderMime);
+        };
+
+        recorder.start();
+      } catch (error) {
+        console.error("Impossible de démarrer l'enregistrement audio", error);
+        cleanupMediaStream();
+        mediaRecorderRef.current = null;
+        setIsListening(false);
+
+        if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+          setVoiceError(
+            "Accès au micro refusé. Vérifie les autorisations du navigateur."
+          );
+        } else if (error?.name === "NotFoundError") {
+          setVoiceError("Microphone introuvable ou occupé.");
+        } else {
+          setVoiceError("Impossible d'accéder au micro. Réessaie.");
+        }
+      }
+    }
+  };
+
+  const toggleVoiceRecognition = async () => {
+    if (!isVoiceSupported || isTranscribingAudio) {
+      return;
+    }
+
     if (isListening) {
-      stopVoiceRecognition();
+      await stopVoiceRecognition();
     } else {
-      startVoiceRecognition();
+      await startVoiceRecognition();
     }
   };
 
@@ -608,6 +882,12 @@ function App() {
 
   const resetComposer = () => {
     stopVoiceRecognition();
+    audioChunksRef.current = [];
+    cleanupMediaStream();
+    mediaRecorderRef.current = null;
+    voiceCaptureStateRef.current = { base: "", final: "" };
+    setIsListening(false);
+    setIsTranscribingAudio(false);
     setInput("");
     setSelectedFiles([]);
     setVoiceError("");
@@ -760,11 +1040,15 @@ function App() {
 
   const voiceButtonLabel = isListening
     ? "Arrêter la dictée vocale"
+    : isTranscribingAudio
+    ? "Transcription audio en cours"
     : "Activer la dictée vocale";
   const voiceButtonTitle = !hasCheckedVoiceSupport
     ? "Vérification du micro en cours..."
     : !isVoiceSupported
     ? "La commande vocale n'est pas disponible sur ce navigateur"
+    : isTranscribingAudio
+    ? "Transcription de l'enregistrement en cours..."
     : voiceButtonLabel;
 
   const copyTextToClipboard = async (text) => {
@@ -964,137 +1248,185 @@ function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") {
+      voiceModeRef.current = VOICE_MODE_UNSUPPORTED;
+      setIsVoiceSupported(false);
+      setHasCheckedVoiceSupport(true);
       return;
     }
 
     const SpeechRecognition =
       window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    if (!SpeechRecognition) {
-      setIsVoiceSupported(false);
-      setHasCheckedVoiceSupport(true);
-      return;
-    }
+    if (SpeechRecognition) {
+      voiceModeRef.current = VOICE_MODE_BROWSER;
+      const recognition = new SpeechRecognition();
+      recognition.lang = "fr-FR";
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = "fr-FR";
-    recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
+      recognition.onstart = () => {
+        setIsListening(true);
+        setVoiceError("");
+      };
 
-    recognition.onstart = () => {
-      setIsListening(true);
-      setVoiceError("");
-    };
+      recognition.onresult = (event) => {
+        let interimTranscript = "";
+        let finalTranscript = "";
 
-    recognition.onresult = (event) => {
-      let interimTranscript = "";
-      let finalTranscript = "";
+        for (let index = event.resultIndex; index < event.results.length; index += 1) {
+          const result = event.results[index];
+          const transcript = result[0]?.transcript ?? "";
 
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcript = result[0]?.transcript ?? "";
+          if (!transcript) {
+            continue;
+          }
 
-        if (!transcript) {
-          continue;
+          if (result.isFinal) {
+            finalTranscript = joinWithSpace(
+              finalTranscript,
+              transcript.trim()
+            );
+          } else {
+            interimTranscript = joinWithSpace(
+              interimTranscript,
+              transcript.trim()
+            );
+          }
         }
 
-        if (result.isFinal) {
-          finalTranscript = joinWithSpace(
-            finalTranscript,
-            transcript.trim()
-          );
-        } else {
-          interimTranscript = joinWithSpace(
-            interimTranscript,
-            transcript.trim()
-          );
+        if (!finalTranscript && !interimTranscript) {
+          return;
         }
-      }
 
-      if (!finalTranscript && !interimTranscript) {
-        return;
-      }
+        if (finalTranscript) {
+          voiceCaptureStateRef.current = {
+            ...voiceCaptureStateRef.current,
+            final: joinWithSpace(
+              voiceCaptureStateRef.current.final,
+              finalTranscript
+            ),
+          };
+        }
 
-      if (finalTranscript) {
-        voiceCaptureStateRef.current = {
-          ...voiceCaptureStateRef.current,
-          final: joinWithSpace(
-            voiceCaptureStateRef.current.final,
-            finalTranscript
-          ),
-        };
-      }
+        const combinedText = joinWithSpace(
+          voiceCaptureStateRef.current.base,
+          joinWithSpace(voiceCaptureStateRef.current.final, interimTranscript)
+        );
 
-      const combinedText = joinWithSpace(
-        voiceCaptureStateRef.current.base,
-        joinWithSpace(voiceCaptureStateRef.current.final, interimTranscript)
-      );
+        setInput(combinedText);
+        setVoiceError("");
+      };
 
-      setInput(combinedText);
-      setVoiceError("");
-    };
+      recognition.onerror = (event) => {
+        let message = "La dictée vocale a rencontré une erreur.";
 
-    recognition.onerror = (event) => {
-      let message = "La dictée vocale a rencontré une erreur.";
+        switch (event.error) {
+          case "not-allowed":
+          case "service-not-allowed":
+            message =
+              "Accès au micro refusé. Vérifie les autorisations du navigateur.";
+            break;
+          case "no-speech":
+            message = "Aucun son détecté. Réessaie.";
+            break;
+          case "audio-capture":
+            message = "Microphone introuvable ou occupé.";
+            break;
+          default:
+            break;
+        }
 
-      switch (event.error) {
-        case "not-allowed":
-        case "service-not-allowed":
-          message =
-            "Accès au micro refusé. Vérifie les autorisations du navigateur.";
-          break;
-        case "no-speech":
-          message = "Aucun son détecté. Réessaie.";
-          break;
-        case "audio-capture":
-          message = "Microphone introuvable ou occupé.";
-          break;
-        default:
-          break;
-      }
+        setIsListening(false);
+        setVoiceError(message);
+      };
 
-      setIsListening(false);
-      setVoiceError(message);
-    };
+      recognition.onend = () => {
+        setIsListening(false);
 
-    recognition.onend = () => {
-      setIsListening(false);
-      setInput((previousInput) => {
         const finalText = joinWithSpace(
           voiceCaptureStateRef.current.base,
           voiceCaptureStateRef.current.final
         );
-        return finalText || previousInput;
-      });
-      voiceCaptureStateRef.current = { base: "", final: "" };
-    };
 
-    recognitionRef.current = recognition;
-    setIsVoiceSupported(true);
-    setHasCheckedVoiceSupport(true);
+        setInput((previousInput) => finalText || previousInput);
+        voiceCaptureStateRef.current = { base: "", final: "" };
 
-    return () => {
-      recognition.onstart = null;
-      recognition.onresult = null;
-      recognition.onerror = null;
-      recognition.onend = null;
+        const hasVoiceContent =
+          typeof finalText === "string" && finalText.trim().length > 0;
+        const hasAttachments = selectedFilesRef.current.length > 0;
 
-      try {
-        recognition.stop();
-      } catch (error) {
-        if (error?.name !== "InvalidStateError") {
-          console.warn(
-            "Impossible d'arrêter la dictée vocale lors du nettoyage",
-            error
-          );
+        if (!hasVoiceContent && !hasAttachments) {
+          return;
         }
-      }
 
-      recognitionRef.current = null;
-      voiceCaptureStateRef.current = { base: "", final: "" };
-      setIsListening(false);
-    };
+        sendMessageRef
+          .current(finalText || "")
+          .catch((error) => {
+            console.error(
+              "Impossible d'envoyer automatiquement le message vocal",
+              error
+            );
+          });
+      };
+
+      recognitionRef.current = recognition;
+      setIsVoiceSupported(true);
+      setHasCheckedVoiceSupport(true);
+
+      return () => {
+        recognition.onstart = null;
+        recognition.onresult = null;
+        recognition.onerror = null;
+        recognition.onend = null;
+
+        try {
+          recognition.stop();
+        } catch (error) {
+          if (error?.name !== "InvalidStateError") {
+            console.warn(
+              "Impossible d'arrêter la dictée vocale lors du nettoyage",
+              error
+            );
+          }
+        }
+
+        recognitionRef.current = null;
+        voiceCaptureStateRef.current = { base: "", final: "" };
+        setIsListening(false);
+        voiceModeRef.current = VOICE_MODE_UNSUPPORTED;
+      };
+    }
+
+    const hasMediaRecorder =
+      typeof window.MediaRecorder !== "undefined" &&
+      typeof window.MediaRecorder === "function";
+    const canUseMicrophone =
+      typeof navigator !== "undefined" &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function";
+
+    if (hasMediaRecorder && canUseMicrophone) {
+      voiceModeRef.current = VOICE_MODE_FALLBACK;
+      setIsVoiceSupported(true);
+      setHasCheckedVoiceSupport(true);
+
+      return () => {
+        cleanupMediaStream();
+        mediaRecorderRef.current = null;
+        audioChunksRef.current = [];
+        setIsListening(false);
+        voiceModeRef.current = VOICE_MODE_UNSUPPORTED;
+      };
+    }
+
+    voiceModeRef.current = VOICE_MODE_UNSUPPORTED;
+    setIsVoiceSupported(false);
+    setHasCheckedVoiceSupport(true);
   }, []);
+
+  useEffect(() => {
+    selectedFilesRef.current = selectedFiles;
+  }, [selectedFiles]);
 
   useEffect(() => {
     return () => {
@@ -1111,13 +1443,18 @@ function App() {
     }
   }, [conversations, activeConversationId]);
 
-  const sendMessage = async () => {
+  const sendMessage = async (textOverride = null, filesOverride = null) => {
     if (isListening) {
-      stopVoiceRecognition();
+      await stopVoiceRecognition();
     }
 
-    const trimmedInput = input.trim();
-    const hasAttachments = selectedFiles.length > 0;
+    const effectiveText =
+      typeof textOverride === "string" ? textOverride : input;
+    const filesToSend = Array.isArray(filesOverride)
+      ? filesOverride
+      : selectedFiles;
+    const trimmedInput = effectiveText.trim();
+    const hasAttachments = filesToSend.length > 0;
 
     if (isActiveConversationLoading) {
       return;
@@ -1133,8 +1470,7 @@ function App() {
       return;
     }
 
-    const messageText = input;
-    const filesToSend = selectedFiles;
+    const messageText = effectiveText;
     const attachmentSummaries = filesToSend.map((file) => ({
       name: file.name,
       type: file.type,
@@ -1249,6 +1585,8 @@ function App() {
       );
     }
   };
+
+  sendMessageRef.current = sendMessage;
 
   const handleFileSelection = (files) => {
     const fileArray = Array.from(files || []);
@@ -1453,13 +1791,18 @@ function App() {
               }`}
               onClick={toggleVoiceRecognition}
               disabled={
-                !hasCheckedVoiceSupport || !isVoiceSupported || isActiveConversationLoading
+                !hasCheckedVoiceSupport ||
+                !isVoiceSupported ||
+                isActiveConversationLoading ||
+                isTranscribingAudio
               }
               aria-pressed={isListening}
               aria-label={voiceButtonLabel}
               title={voiceButtonTitle}
             >
-              <span aria-hidden="true">{isListening ? "⏹️" : "🎙️"}</span>
+              <span aria-hidden="true">
+                {isListening ? "⏹️" : isTranscribingAudio ? "⏳" : "🎙️"}
+              </span>
             </button>
             <input
               type="text"
@@ -1505,6 +1848,11 @@ function App() {
               🎙️ Dictée vocale en cours… parle librement.
             </div>
           )}
+          {isTranscribingAudio && !isListening && (
+            <div className="voice-support-hint active" role="status">
+              🎙️ Transcription de l'audio en cours…
+            </div>
+          )}
           {voiceError && (
             <div className="voice-support-hint error" role="alert">
               🎙️ {voiceError}
@@ -1512,7 +1860,7 @@ function App() {
           )}
           {hasCheckedVoiceSupport && !isVoiceSupported && !voiceError && (
             <div className="voice-support-hint" role="note">
-              🎙️ La commande vocale nécessite un navigateur compatible (Chrome, Edge…).
+              🎙️ La commande vocale nécessite un navigateur compatible (Chrome, Edge, Opera GX…).
             </div>
           )}
         </footer>
