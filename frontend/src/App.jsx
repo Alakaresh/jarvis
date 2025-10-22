@@ -574,6 +574,7 @@ function App() {
   const recognitionRef = useRef(null);
   const voiceCaptureStateRef = useRef({ base: "", final: "" });
   const voiceModeRef = useRef(VOICE_MODE_UNSUPPORTED);
+  const sendMessageRef = useRef(async () => {});
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -626,7 +627,7 @@ function App() {
       if (isJson) {
         try {
           payload = await response.json();
-        } catch (parseError) {
+        } catch {
           if (response.ok) {
             throw new Error("Réponse de transcription invalide.");
           }
@@ -650,8 +651,17 @@ function App() {
         return;
       }
 
-      setInput((previousInput) => joinWithSpace(previousInput, transcript));
+      let combinedText = "";
+      setInput((previousInput) => {
+        const nextInput = joinWithSpace(previousInput, transcript);
+        combinedText = nextInput;
+        return nextInput;
+      });
       setVoiceError("");
+
+      if (typeof combinedText === "string" && combinedText.trim().length > 0) {
+        sendMessageRef.current(combinedText);
+      }
     } catch (error) {
       const message =
         error instanceof Error
@@ -1321,13 +1331,20 @@ function App() {
 
       recognition.onend = () => {
         setIsListening(false);
-        setInput((previousInput) => {
-          const finalText = joinWithSpace(
-            voiceCaptureStateRef.current.base,
-            voiceCaptureStateRef.current.final
-          );
-          return finalText || previousInput;
-        });
+
+        const baseText = voiceCaptureStateRef.current.base;
+        const finalTranscript = voiceCaptureStateRef.current.final;
+        const combinedText = joinWithSpace(baseText, finalTranscript);
+        const hasFinalTranscript =
+          typeof finalTranscript === "string" && finalTranscript.trim().length > 0;
+
+        if (hasFinalTranscript) {
+          setInput(combinedText);
+          sendMessageRef.current(combinedText);
+        } else {
+          setInput((previousInput) => combinedText || previousInput);
+        }
+
         voiceCaptureStateRef.current = { base: "", final: "" };
       };
 
@@ -1401,19 +1418,22 @@ function App() {
     }
   }, [conversations, activeConversationId]);
 
-  const sendMessage = async () => {
+  const sendMessage = async (overrideText) => {
     if (isListening) {
       await stopVoiceRecognition();
     }
 
-    const trimmedInput = input.trim();
-    const hasAttachments = selectedFiles.length > 0;
+    const messageToSend =
+      typeof overrideText === "string" ? overrideText : input;
+    const trimmedMessage = messageToSend.trim();
+    const filesToSend = selectedFiles.slice();
+    const hasAttachments = filesToSend.length > 0;
 
     if (isActiveConversationLoading) {
       return;
     }
 
-    if (!trimmedInput && !hasAttachments) {
+    if (!trimmedMessage && !hasAttachments) {
       return;
     }
 
@@ -1423,8 +1443,6 @@ function App() {
       return;
     }
 
-    const messageText = input;
-    const filesToSend = selectedFiles;
     const attachmentSummaries = filesToSend.map((file) => ({
       name: file.name,
       type: file.type,
@@ -1432,7 +1450,7 @@ function App() {
 
     const userMsg = {
       sender: "user",
-      text: messageText,
+      text: messageToSend,
       attachments: attachmentSummaries,
     };
 
@@ -1456,7 +1474,7 @@ function App() {
       appendMessageToConversation(conversationIdForRequest, placeholderBotMessage);
 
       const formData = new FormData();
-      formData.append("text", messageText);
+      formData.append("text", messageToSend);
       filesToSend.forEach((file) => {
         formData.append("files", file);
       });
@@ -1539,6 +1557,8 @@ function App() {
       );
     }
   };
+
+  sendMessageRef.current = sendMessage;
 
   const handleFileSelection = (files) => {
     const fileArray = Array.from(files || []);
