@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime as real_datetime, timezone as real_timezone
+from zoneinfo import ZoneInfo
 
 import pytest
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
+import fastapi.dependencies.utils as fastapi_utils
 
+fastapi_utils.ensure_multipart_is_installed = lambda: None
+
+import backend.main as main
 from backend.config import Settings
-from backend.main import app
 from backend.services.ai_provider import (
     HuggingFaceProvider,
     OpenAIProvider,
@@ -14,6 +19,40 @@ from backend.services.ai_provider import (
     ProviderRequestError,
     create_provider,
 )
+
+
+pytestmark = pytest.mark.anyio("asyncio")
+
+
+WEEKDAYS_FR = [
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+]
+
+MONTHS_FR = [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+]
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 
 def test_create_provider_openai():
@@ -55,55 +94,83 @@ def test_create_provider_unknown():
         create_provider("invalid")
 
 
-def test_chat_endpoint_success(monkeypatch):
-    class DummyProvider:
-        def generate_response(self, prompt: str) -> str:
-            return f"echo: {prompt}"
-
-    monkeypatch.setattr("backend.main._provider", DummyProvider())
-    monkeypatch.setattr("backend.main._provider_error", None)
-    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
-
-    client = TestClient(app)
-    response = client.post("/chat", json={"text": "hello"})
-
-    assert response.status_code == 200
-    assert response.json() == {"response": "echo: hello"}
-
-
-def test_chat_endpoint_provider_error(monkeypatch):
-    class FailingProvider:
-        def generate_response(self, prompt: str) -> str:
-            raise ProviderRequestError("boom")
-
-    monkeypatch.setattr("backend.main._provider", FailingProvider())
-    monkeypatch.setattr("backend.main._provider_error", None)
-    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
-
-    client = TestClient(app)
-    response = client.post("/chat", json={"text": "hello"})
-
-    assert response.status_code == 502
-    assert response.json()["detail"] == "boom"
-
-
-def test_chat_endpoint_configuration_error(monkeypatch):
-    monkeypatch.setattr("backend.main._provider", None)
-    monkeypatch.setattr("backend.main._provider_error", ProviderConfigurationError("config broken"))
-    monkeypatch.setattr("backend.main._recent_history", deque(maxlen=5))
-
-    client = TestClient(app)
-    response = client.post("/chat", json={"text": "ignored"})
-
-    assert response.status_code == 500
-    assert response.json()["detail"] == "config broken"
-
-
-def test_chat_includes_recent_history(monkeypatch):
+async def test_chat_endpoint_success(monkeypatch):
     prompts: list[str] = []
 
     class RecordingProvider:
-        def generate_response(self, prompt: str) -> str:
+        def generate_response(self, prompt: str, attachments=None) -> str:  # type: ignore[override]
+            prompts.append(prompt)
+            return "réponse"
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            base = real_datetime(2024, 6, 5, 14, 30, tzinfo=real_timezone.utc)
+            if tz is not None:
+                return base.astimezone(tz)
+            return base
+
+    monkeypatch.setattr(main, "datetime", FixedDatetime)
+    monkeypatch.setattr(main, "_provider", RecordingProvider())
+    monkeypatch.setattr(main, "_provider_error", None)
+    monkeypatch.setattr(main, "_recent_history", deque(maxlen=5))
+
+    response = await main.chat(text="hello", files=None, stream=False)
+
+    assert response == {"response": "réponse"}
+
+    expected_now = FixedDatetime.now(real_timezone.utc).astimezone(ZoneInfo("Europe/Paris"))
+    weekday = WEEKDAYS_FR[expected_now.weekday()]
+    month = MONTHS_FR[expected_now.month - 1]
+    date_description = f"{weekday} {expected_now.day} {month} {expected_now.year}"
+    time_description = expected_now.strftime("%H:%M")
+    iso_timestamp = expected_now.isoformat(timespec="minutes")
+    expected_context = (
+        "Informations temporelles actuelles :\n"
+        f"- Nous sommes {date_description}.\n"
+        f"- Il est {time_description} (heure de Paris).\n"
+        f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
+        "Prends en compte cette temporalité lorsque c'est pertinent."
+    )
+    assert prompts, "Le provider aurait dû être appelé"
+    prompt = prompts[0]
+    assert prompt.startswith(expected_context)
+    assert prompt.endswith("Nouvelle demande :\nhello")
+
+
+async def test_chat_endpoint_provider_error(monkeypatch):
+    class FailingProvider:
+        def generate_response(self, prompt: str, attachments=None) -> str:  # type: ignore[override]
+            raise ProviderRequestError("boom")
+
+    monkeypatch.setattr(main, "_provider", FailingProvider())
+    monkeypatch.setattr(main, "_provider_error", None)
+    monkeypatch.setattr(main, "_recent_history", deque(maxlen=5))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.chat(text="hello", files=None, stream=False)
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == "boom"
+
+
+async def test_chat_endpoint_configuration_error(monkeypatch):
+    monkeypatch.setattr(main, "_provider", None)
+    monkeypatch.setattr(main, "_provider_error", ProviderConfigurationError("config broken"))
+    monkeypatch.setattr(main, "_recent_history", deque(maxlen=5))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.chat(text="ignored", files=None, stream=False)
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "config broken"
+
+
+async def test_chat_includes_recent_history(monkeypatch):
+    prompts: list[str] = []
+
+    class RecordingProvider:
+        def generate_response(self, prompt: str, attachments=None) -> str:  # type: ignore[override]
             prompts.append(prompt)
             return "réponse"
 
@@ -111,16 +178,14 @@ def test_chat_includes_recent_history(monkeypatch):
     for idx in range(1, 6):
         history.append((f"question {idx}", f"réponse {idx}"))
 
-    monkeypatch.setattr("backend.main._provider", RecordingProvider())
-    monkeypatch.setattr("backend.main._provider_error", None)
-    monkeypatch.setattr("backend.main._memory", None)
-    monkeypatch.setattr("backend.main._recent_history", history)
+    monkeypatch.setattr(main, "_provider", RecordingProvider())
+    monkeypatch.setattr(main, "_provider_error", None)
+    monkeypatch.setattr(main, "_memory", None)
+    monkeypatch.setattr(main, "_recent_history", history)
 
-    client = TestClient(app)
-    response = client.post("/chat", json={"text": "quelle est la météo ?"})
+    response = await main.chat(text="quelle est la météo ?", files=None, stream=False)
 
-    assert response.status_code == 200
-    assert response.json() == {"response": "réponse"}
+    assert response == {"response": "réponse"}
 
     assert prompts, "Le provider aurait dû être appelé"
     prompt = prompts[0]
