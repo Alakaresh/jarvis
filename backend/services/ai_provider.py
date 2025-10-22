@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 from dataclasses import dataclass
-from typing import Iterable, Protocol, runtime_checkable
+from typing import Iterable, Literal, Protocol, runtime_checkable
 import httpx
 from openai import OpenAI  # ✅ Nouveau SDK officiel
 
@@ -31,6 +31,35 @@ class Attachment:
     content_type: str | None = None
 
 
+# === Streaming helpers ===
+@dataclass
+class StreamEvent:
+    """Represents a chunk emitted during a streaming response."""
+
+    type: Literal["text-delta", "audio-delta"]
+    text: str | None = None
+    audio: str | None = None
+    audio_format: str | None = None
+    audio_sample_rate: int | None = None
+
+    def to_payload(self) -> dict[str, str | int]:
+        payload: dict[str, str | int] = {"type": self.type}
+
+        if self.text is not None:
+            payload["text"] = self.text
+
+        if self.audio is not None:
+            payload["audio"] = self.audio
+
+        if self.audio_format is not None:
+            payload["audio_format"] = self.audio_format
+
+        if self.audio_sample_rate is not None:
+            payload["audio_sample_rate"] = self.audio_sample_rate
+
+        return payload
+
+
 # === Interface commune ===
 @runtime_checkable
 class AIProvider(Protocol):
@@ -41,7 +70,7 @@ class AIProvider(Protocol):
 
     def stream_response(
         self, prompt: str, attachments: list[Attachment] | None = None
-    ) -> Iterable[str]:
+    ) -> Iterable[StreamEvent]:
         """Yield chunks of a response for the given prompt."""
 
 
@@ -52,6 +81,9 @@ class OpenAIProvider:
 
     api_key: str
     model: str = "gpt-4o-mini"
+    voice: str = "alloy"
+    audio_format: str = "pcm16"
+    audio_sample_rate: int = 24000
 
     def __post_init__(self) -> None:
         if not self.api_key:
@@ -85,7 +117,7 @@ class OpenAIProvider:
 
     def stream_response(
         self, prompt: str, attachments: list[Attachment] | None = None
-    ) -> Iterable[str]:
+    ) -> Iterable[StreamEvent]:
         try:
             input_content = self._create_input_content(prompt, attachments)
 
@@ -93,12 +125,23 @@ class OpenAIProvider:
                 model=self.model,
                 input=[{"role": "user", "content": input_content}],
                 instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
+                modalities=["text", "audio"],
+                audio={"voice": self.voice, "format": self.audio_format},
             ) as stream:
                 for event in stream:
                     if event.type == "response.output_text.delta":
                         delta = event.delta or ""
                         if delta:
-                            yield delta
+                            yield StreamEvent(type="text-delta", text=delta)
+                    elif event.type == "response.output_audio.delta":
+                        audio_chunk = event.delta or ""
+                        if audio_chunk:
+                            yield StreamEvent(
+                                type="audio-delta",
+                                audio=audio_chunk,
+                                audio_format=self.audio_format,
+                                audio_sample_rate=self.audio_sample_rate,
+                            )
                     elif event.type == "response.error":
                         raise ProviderRequestError(event.error.message)
 
@@ -113,7 +156,13 @@ class OpenAIProvider:
     def generate_response(
         self, prompt: str, attachments: list[Attachment] | None = None
     ) -> str:
-        final_text = "".join(self.stream_response(prompt, attachments)).strip()
+        final_text_parts: list[str] = []
+
+        for event in self.stream_response(prompt, attachments):
+            if event.type == "text-delta" and event.text:
+                final_text_parts.append(event.text)
+
+        final_text = "".join(final_text_parts).strip()
         return final_text or "(Réponse vide)"
         
 
@@ -157,8 +206,9 @@ class HuggingFaceProvider:
 
     def stream_response(
         self, prompt: str, attachments: list[Attachment] | None = None
-    ) -> Iterable[str]:
-        yield self.generate_response(prompt, attachments)
+    ) -> Iterable[StreamEvent]:
+        text = self.generate_response(prompt, attachments)
+        yield StreamEvent(type="text-delta", text=text)
 
 
 # === Factory ===
