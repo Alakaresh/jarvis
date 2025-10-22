@@ -683,6 +683,19 @@ body {
   padding: 0 16px;
 }
 
+.voice-activation-feedback {
+  font-size: 0.85rem;
+  color: #fecaca;
+  background: rgba(248, 113, 113, 0.12);
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  border-radius: 12px;
+  padding: 8px 16px;
+  width: 80%;
+  max-width: 700px;
+  text-align: center;
+  box-shadow: 0 6px 18px rgba(248, 113, 113, 0.15);
+}
+
 .attachment-pill.pending {
   background-color: rgba(37, 99, 235, 0.18);
   border-color: rgba(59, 130, 246, 0.6);

@@ -683,6 +683,7 @@ function App() {
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
   const [isVoiceReady, setIsVoiceReady] = useState(false);
   const [isVoiceActivating, setIsVoiceActivating] = useState(false);
+  const [voiceActivationError, setVoiceActivationError] = useState(null);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -709,8 +710,13 @@ function App() {
     }
   };
 
-  const ensureAudioContext = async () => {
+  const ensureAudioContext = async (options = {}) => {
+    const { onError } = options ?? {};
+
     if (typeof window === "undefined") {
+      if (typeof onError === "function") {
+        onError("unavailable");
+      }
       return null;
     }
 
@@ -720,6 +726,9 @@ function App() {
 
       if (!AudioContextClass) {
         console.warn("AudioContext non disponible dans ce navigateur");
+        if (typeof onError === "function") {
+          onError("unsupported");
+        }
         return null;
       }
 
@@ -727,21 +736,70 @@ function App() {
         audioContextRef.current = new AudioContextClass();
       } catch (error) {
         console.warn("Impossible d'initialiser l'AudioContext", error);
+        if (typeof onError === "function") {
+          onError("creation-error", error);
+        }
         return null;
       }
     }
 
     const context = audioContextRef.current;
 
-    if (context && context.state === "suspended") {
+    if (!context) {
+      if (typeof onError === "function") {
+        onError("creation-error");
+      }
+      return null;
+    }
+
+    const needsResume =
+      context.state === "suspended" || context.state === "interrupted";
+
+    if (needsResume) {
       try {
         await context.resume();
       } catch (error) {
         console.warn("Impossible de reprendre l'AudioContext", error);
+        if (typeof onError === "function") {
+          onError("resume-error", error);
+        }
+        return null;
       }
     }
 
-    return audioContextRef.current;
+    if (context.state === "closed") {
+      if (typeof onError === "function") {
+        onError("closed");
+      }
+      return null;
+    }
+
+    if (context.state !== "running") {
+      if (typeof onError === "function") {
+        onError("resume-blocked");
+      }
+      return null;
+    }
+
+    return context;
+  };
+
+  const getVoiceActivationMessage = (reason) => {
+    switch (reason) {
+      case "unsupported":
+        return "La lecture audio n'est pas prise en charge par ce navigateur.";
+      case "creation-error":
+        return "Impossible d'initialiser le lecteur audio. Vérifie les autorisations de ton navigateur.";
+      case "resume-error":
+      case "resume-blocked":
+        return "Le navigateur a bloqué l'activation audio. Clique à nouveau ou autorise la lecture automatique du son.";
+      case "closed":
+        return "Le lecteur audio a été fermé. Recharge la page pour réessayer.";
+      case "unavailable":
+        return "Le contexte audio est indisponible dans cet environnement.";
+      default:
+        return "Impossible d'activer la lecture audio pour le moment.";
+    }
   };
 
   const handleActivateVoice = async () => {
@@ -751,23 +809,21 @@ function App() {
 
     const activationPromise = (async () => {
       setIsVoiceActivating(true);
+      setVoiceActivationError(null);
 
       try {
-        const context = await ensureAudioContext();
+        const context = await ensureAudioContext({
+          onError: (reason) => {
+            setVoiceActivationError(getVoiceActivationMessage(reason));
+          },
+        });
 
         if (!context || context.state === "closed") {
           setIsVoiceReady(false);
+          setVoiceActivationError((previous) =>
+            previous ?? getVoiceActivationMessage("closed")
+          );
           return null;
-        }
-
-        if (context.state === "suspended") {
-          try {
-            await context.resume();
-          } catch (error) {
-            console.warn("Impossible de reprendre l'AudioContext", error);
-            setIsVoiceReady(false);
-            return null;
-          }
         }
 
         const currentTime =
@@ -779,9 +835,13 @@ function App() {
 
         audioPlaybackTimeRef.current = Math.max(previousPlayback, currentTime);
         setIsVoiceReady(true);
+        setVoiceActivationError(null);
         return context;
       } catch (error) {
         console.warn("Impossible d'activer la lecture audio", error);
+        setVoiceActivationError((previous) =>
+          previous ?? getVoiceActivationMessage("unknown")
+        );
         setIsVoiceReady(false);
         return null;
       } finally {
@@ -1805,6 +1865,11 @@ function App() {
               aria-label="Message à envoyer à Jarvis"
             />
           </div>
+          {voiceActivationError && (
+            <div className="voice-activation-feedback" role="alert">
+              {voiceActivationError}
+            </div>
+          )}
           {isActiveConversationLoading && (
             <div className="conversation-loading-hint">
               ✨ Jarvis rédige une réponse...
