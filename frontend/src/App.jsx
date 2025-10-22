@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import "./App.css";
+import RealtimeVoiceChat from "./components/RealtimeVoiceChat";
 
 const LANGUAGE_ALIASES = {
   js: "javascript",
@@ -1396,6 +1397,8 @@ function App() {
         <header className="app-header">
           🤖 Jarvis — {activeConversation?.title || "Nouvelle conversation"}
         </header>
+
+        <RealtimeVoiceChat />
 
         <main ref={chatRef} className="chat-container" aria-live="polite">
           {messages.length === 0 && (

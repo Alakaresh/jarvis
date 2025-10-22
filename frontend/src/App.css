@@ -170,6 +170,300 @@ body {
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
 }
 
+/* ----- Conversation vocale temps réel ----- */
+.realtime-voice-card {
+  margin: 24px 32px 0;
+  padding: 24px 28px;
+  border-radius: 22px;
+  border: 1px solid rgba(96, 165, 250, 0.22);
+  background: linear-gradient(150deg, rgba(30, 41, 59, 0.85), rgba(15, 23, 42, 0.95));
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  position: relative;
+  overflow: hidden;
+}
+
+.realtime-voice-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    circle at 20% 20%,
+    rgba(59, 130, 246, 0.25),
+    transparent 60%
+  );
+  opacity: 0.35;
+}
+
+.realtime-voice-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.realtime-voice-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 620px;
+  position: relative;
+  z-index: 1;
+}
+
+.realtime-voice-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #f8fafc;
+}
+
+.realtime-voice-description {
+  margin: 0;
+  color: #cbd5f5;
+  font-size: 0.95rem;
+  line-height: 1.5;
+  opacity: 0.92;
+}
+
+.realtime-voice-status {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  background: rgba(148, 163, 184, 0.18);
+  color: #e2e8f0;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.35);
+}
+
+.realtime-voice-status[data-tone="pending"] {
+  background: rgba(59, 130, 246, 0.2);
+  color: #bfdbfe;
+  border-color: rgba(96, 165, 250, 0.38);
+}
+
+.realtime-voice-status[data-tone="thinking"] {
+  background: rgba(168, 85, 247, 0.2);
+  color: #e9d5ff;
+  border-color: rgba(192, 132, 252, 0.45);
+}
+
+.realtime-voice-status[data-tone="listening"] {
+  background: rgba(34, 197, 94, 0.2);
+  color: #bbf7d0;
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.realtime-voice-status[data-tone="speaking"] {
+  background: rgba(249, 115, 22, 0.22);
+  color: #fed7aa;
+  border-color: rgba(251, 146, 60, 0.45);
+}
+
+.realtime-voice-status[data-tone="error"] {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.realtime-voice-status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 12px currentColor;
+}
+
+@keyframes realtimeSpeakingPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: scale(1.35);
+    opacity: 0.5;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+}
+
+.realtime-voice-status[data-tone="speaking"] .realtime-voice-status-indicator {
+  animation: realtimeSpeakingPulse 1.2s ease-in-out infinite;
+}
+
+.realtime-voice-controls {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  align-items: center;
+}
+
+.realtime-voice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.realtime-voice-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease,
+    background 0.2s ease;
+  color: #f8fafc;
+}
+
+.realtime-voice-button.start {
+  background: linear-gradient(
+    135deg,
+    rgba(59, 130, 246, 0.38),
+    rgba(37, 99, 235, 0.78)
+  );
+  border-color: rgba(96, 165, 250, 0.45);
+  box-shadow: 0 18px 36px rgba(37, 99, 235, 0.42);
+}
+
+.realtime-voice-button.start:hover:not(:disabled),
+.realtime-voice-button.start:focus-visible:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 22px 40px rgba(37, 99, 235, 0.55);
+  outline: none;
+}
+
+.realtime-voice-button.stop {
+  background: rgba(239, 68, 68, 0.24);
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #fecaca;
+  box-shadow: 0 16px 32px rgba(239, 68, 68, 0.35);
+}
+
+.realtime-voice-button.stop:hover:not(:disabled),
+.realtime-voice-button.stop:focus-visible:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 20px 38px rgba(239, 68, 68, 0.48);
+  outline: none;
+}
+
+.realtime-voice-button:disabled,
+.realtime-voice-button.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+}
+
+.realtime-voice-button:disabled {
+  border-color: rgba(148, 163, 184, 0.3);
+  background: rgba(30, 41, 59, 0.4);
+}
+
+.realtime-voice-select,
+.realtime-voice-language {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: #cbd5f5;
+  min-width: 160px;
+}
+
+.realtime-voice-select select,
+.realtime-voice-language input {
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(15, 23, 42, 0.75);
+  color: #f8fafc;
+  font-size: 0.95rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.realtime-voice-select select:focus-visible,
+.realtime-voice-language input:focus-visible {
+  border-color: rgba(96, 165, 250, 0.65);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+  outline: none;
+}
+
+.realtime-voice-select select:disabled,
+.realtime-voice-language input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.realtime-voice-note {
+  position: relative;
+  z-index: 1;
+  margin: -6px 0 0;
+  font-size: 0.85rem;
+  color: #cbd5f5;
+  opacity: 0.85;
+}
+
+.realtime-voice-error {
+  position: relative;
+  z-index: 1;
+  margin: 4px 0 0;
+  padding: 12px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(239, 68, 68, 0.18);
+  color: #fecaca;
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px rgba(248, 113, 113, 0.15);
+}
+
+.realtime-voice-audio {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .realtime-voice-card {
+    margin: 16px;
+    padding: 20px;
+  }
+
+  .realtime-voice-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .realtime-voice-controls {
+    align-items: stretch;
+  }
+
+  .realtime-voice-actions {
+    width: 100%;
+  }
+
+  .realtime-voice-button {
+    flex: 1;
+  }
+}
+
 /* ----- Zone de chat ----- */
 .chat-container {
   flex: 1;
