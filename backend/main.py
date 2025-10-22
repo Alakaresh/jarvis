@@ -8,8 +8,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import sys
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
@@ -329,6 +330,68 @@ async def chat(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/realtime/session", response_class=Response)
+async def create_realtime_session(request: Request, model: str | None = None, voice: str | None = None):
+    """Proxy a WebRTC offer to the OpenAI Realtime API and return its SDP answer."""
+
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "La fonctionnalité vocale temps réel nécessite une clé API OpenAI.",
+        )
+
+    try:
+        offer_payload = await request.body()
+    except Exception as exc:  # pragma: no cover - unexpected body read failure
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Impossible de lire l'offre SDP envoyée.",
+        ) from exc
+
+    if not offer_payload:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "L'offre SDP est vide.",
+        )
+
+    target_model = model or "gpt-4o-realtime-preview"
+    upstream_params: dict[str, str] = {"model": target_model}
+    if voice:
+        upstream_params["voice"] = voice
+
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "OpenAI-Beta": "realtime=v1",
+        "Content-Type": "application/sdp",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            upstream_response = await client.post(
+                "https://api.openai.com/v1/realtime",
+                params=upstream_params,
+                content=offer_payload,
+                headers=headers,
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Impossible de contacter l'API Realtime d'OpenAI.",
+        ) from exc
+
+    answer_sdp = upstream_response.text
+
+    if upstream_response.status_code >= 400:
+        detail = answer_sdp.strip() or "Erreur renvoyée par l'API Realtime d'OpenAI."
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, detail)
+
+    if not answer_sdp:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Réponse SDP vide reçue de l'API Realtime d'OpenAI.",
+        )
+
+    return Response(content=answer_sdp, media_type="application/sdp")
 
 
 @app.post("/transcribe-audio")

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const LANGUAGE_ALIASES = {
@@ -151,6 +151,12 @@ const HASH_COMMENT_LANGUAGES = new Set([
 const VOICE_MODE_BROWSER = "browser";
 const VOICE_MODE_FALLBACK = "fallback";
 const VOICE_MODE_UNSUPPORTED = "unsupported";
+
+const REALTIME_MODEL = "gpt-4o-realtime-preview";
+const REALTIME_VOICES = [
+  { value: "verse", label: "Verse" },
+  { value: "alloy", label: "Alloy" },
+];
 
 const guessExtensionFromMime = (mimeType) => {
   if (typeof mimeType !== "string") {
@@ -566,6 +572,10 @@ function App() {
   const [hasCheckedVoiceSupport, setHasCheckedVoiceSupport] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState("");
+  const [isRealtimeActive, setIsRealtimeActive] = useState(false);
+  const [realtimeStatus, setRealtimeStatus] = useState("idle");
+  const [realtimeError, setRealtimeError] = useState("");
+  const [realtimeVoice, setRealtimeVoice] = useState(REALTIME_VOICES[0].value);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -578,7 +588,54 @@ function App() {
   const mediaStreamRef = useRef(null);
   const audioChunksRef = useRef([]);
   const fallbackMimeTypeRef = useRef("audio/webm");
+  const peerConnectionRef = useRef(null);
+  const realtimeStreamRef = useRef(null);
+  const realtimeRemoteAudioRef = useRef(null);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+
+  const stopRealtimeSession = useCallback(() => {
+    const peerConnection = peerConnectionRef.current;
+    if (peerConnection) {
+      try {
+        peerConnection.ontrack = null;
+        peerConnection.oniceconnectionstatechange = null;
+        peerConnection.onconnectionstatechange = null;
+        peerConnection.close();
+      } catch (error) {
+        console.warn("Impossible de fermer la connexion WebRTC", error);
+      }
+    }
+    peerConnectionRef.current = null;
+
+    const localStream = realtimeStreamRef.current;
+    if (localStream) {
+      localStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.warn("Impossible d'arrêter une piste WebRTC", error);
+        }
+      });
+    }
+    realtimeStreamRef.current = null;
+
+    const remoteAudioElement = realtimeRemoteAudioRef.current;
+    if (remoteAudioElement) {
+      try {
+        remoteAudioElement.pause();
+      } catch (error) {
+        console.warn("Impossible de mettre l'audio distant en pause", error);
+      }
+      remoteAudioElement.srcObject = null;
+      remoteAudioElement.onplaying = null;
+      remoteAudioElement.onpause = null;
+      remoteAudioElement.onended = null;
+      remoteAudioElement.onwaiting = null;
+    }
+
+    setIsRealtimeActive(false);
+    setRealtimeStatus("idle");
+  }, []);
 
   const cleanupMediaStream = () => {
     const stream = mediaStreamRef.current;
@@ -851,6 +908,228 @@ function App() {
     }
   };
 
+  const startRealtimeSession = async () => {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== "function"
+    ) {
+      setRealtimeError("Microphone inaccessible dans ce navigateur.");
+      setRealtimeStatus("idle");
+      setIsRealtimeActive(false);
+      return;
+    }
+
+    if (peerConnectionRef.current) {
+      stopRealtimeSession();
+    }
+
+    setRealtimeError("");
+    setRealtimeStatus("connecting");
+    setIsRealtimeActive(true);
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (error) {
+      const message =
+        error?.name === "NotAllowedError" || error?.name === "SecurityError"
+          ? "Accès au micro refusé. Vérifie les autorisations du navigateur."
+          : error?.name === "NotFoundError"
+          ? "Microphone introuvable ou occupé."
+          : "Impossible d'accéder au micro. Réessaie.";
+
+      setRealtimeError(message);
+      setIsRealtimeActive(false);
+      setRealtimeStatus("idle");
+      return;
+    }
+
+    realtimeStreamRef.current = stream;
+
+    const peerConnection = new RTCPeerConnection({
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    });
+    peerConnectionRef.current = peerConnection;
+
+    stream.getTracks().forEach((track) => peerConnection.addTrack(track, stream));
+
+    peerConnection.oniceconnectionstatechange = () => {
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      const { iceConnectionState } = peerConnection;
+      if (iceConnectionState === "connected" || iceConnectionState === "completed") {
+        setRealtimeStatus((current) => (current === "connecting" ? "listening" : current));
+        return;
+      }
+
+      if (iceConnectionState === "failed") {
+        setRealtimeError("La connexion au service Realtime d'OpenAI a échoué.");
+        stopRealtimeSession();
+      }
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      const { connectionState } = peerConnection;
+
+      if (connectionState === "connected") {
+        setRealtimeStatus("listening");
+        return;
+      }
+
+      if (connectionState === "failed") {
+        setRealtimeError("Connexion perdue avec le service Realtime d'OpenAI.");
+        stopRealtimeSession();
+        return;
+      }
+
+      if (connectionState === "disconnected" || connectionState === "closed") {
+        setRealtimeError("Session vocale interrompue.");
+        stopRealtimeSession();
+      }
+    };
+
+    peerConnection.ontrack = (event) => {
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      const [remoteStream] = event.streams;
+      const audioElement = realtimeRemoteAudioRef.current;
+
+      if (!remoteStream || !audioElement) {
+        return;
+      }
+
+      audioElement.srcObject = remoteStream;
+
+      audioElement.onplaying = () => {
+        if (peerConnectionRef.current === peerConnection) {
+          setRealtimeStatus("speaking");
+        }
+      };
+
+      const backToListening = () => {
+        if (peerConnectionRef.current === peerConnection) {
+          setRealtimeStatus("listening");
+        }
+      };
+
+      audioElement.onpause = backToListening;
+      audioElement.onwaiting = backToListening;
+      audioElement.onended = backToListening;
+
+      const playPromise = audioElement.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch((error) => {
+          console.warn("Lecture audio distante impossible", error);
+        });
+      }
+    };
+
+    try {
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false,
+      });
+      await peerConnection.setLocalDescription(offer);
+
+      await new Promise((resolve) => {
+        if (peerConnection.iceGatheringState === "complete") {
+          resolve();
+          return;
+        }
+
+        const checkState = () => {
+          if (peerConnection.iceGatheringState === "complete") {
+            peerConnection.removeEventListener("icegatheringstatechange", checkState);
+            resolve();
+          }
+        };
+
+        peerConnection.addEventListener("icegatheringstatechange", checkState);
+        setTimeout(() => {
+          peerConnection.removeEventListener("icegatheringstatechange", checkState);
+          resolve();
+        }, 2500);
+      });
+
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      const localDescription = peerConnection.localDescription;
+
+      if (!localDescription?.sdp) {
+        throw new Error("Impossible de générer l'offre SDP locale.");
+      }
+
+      const url = new URL("http://127.0.0.1:8000/api/realtime/session");
+      url.searchParams.set("model", REALTIME_MODEL);
+      if (realtimeVoice) {
+        url.searchParams.set("voice", realtimeVoice);
+      }
+
+      const response = await fetch(url.toString(), {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: localDescription.sdp,
+      });
+
+      const answerSdp = await response.text();
+
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      if (!response.ok) {
+        const detail =
+          answerSdp ||
+          `Erreur lors de la création de la session temps réel (${response.status}).`;
+        throw new Error(detail);
+      }
+
+      await peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+      if (peerConnectionRef.current === peerConnection) {
+        setRealtimeStatus("listening");
+      }
+    } catch (error) {
+      if (peerConnectionRef.current !== peerConnection) {
+        return;
+      }
+
+      console.error("Impossible d'établir la session vocale temps réel", error);
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "Impossible de démarrer la session vocale temps réel.";
+      stopRealtimeSession();
+      setRealtimeError(message);
+    }
+  };
+
+  const toggleRealtimeSession = () => {
+    if (isRealtimeActive) {
+      stopRealtimeSession();
+      setRealtimeError("");
+      return;
+    }
+
+    startRealtimeSession();
+  };
+
+  const handleRealtimeVoiceChange = (event) => {
+    setRealtimeVoice(event.target.value);
+    setRealtimeError("");
+  };
+
   const clearCopyFeedback = () => {
     if (copyTimeoutRef.current) {
       clearTimeout(copyTimeoutRef.current);
@@ -860,6 +1139,8 @@ function App() {
   };
 
   const resetComposer = () => {
+    stopRealtimeSession();
+    setRealtimeError("");
     stopVoiceRecognition();
     audioChunksRef.current = [];
     cleanupMediaStream();
@@ -1021,6 +1302,8 @@ function App() {
     ? "Arrêter la dictée vocale"
     : isTranscribingAudio
     ? "Transcription audio en cours"
+    : isRealtimeActive
+    ? "Session vocale temps réel active"
     : "Activer la dictée vocale";
   const voiceButtonTitle = !hasCheckedVoiceSupport
     ? "Vérification du micro en cours..."
@@ -1028,7 +1311,35 @@ function App() {
     ? "La commande vocale n'est pas disponible sur ce navigateur"
     : isTranscribingAudio
     ? "Transcription de l'enregistrement en cours..."
+    : isRealtimeActive
+    ? "La session vocale temps réel est en cours."
     : voiceButtonLabel;
+
+  const realtimeStatusLabel = (() => {
+    switch (realtimeStatus) {
+      case "connecting":
+        return "Connexion en cours…";
+      case "listening":
+        return "Jarvis écoute 👂";
+      case "speaking":
+        return "Jarvis parle 🗣️";
+      default:
+        return "Session en attente";
+    }
+  })();
+
+  const realtimeStatusClassName = `realtime-status-indicator ${realtimeStatus}`;
+  const realtimeButtonLabel = isRealtimeActive
+    ? "Arrêter la session vocale"
+    : "Démarrer la session vocale";
+  const realtimeButtonIcon =
+    isRealtimeActive && realtimeStatus !== "connecting"
+      ? "🔇"
+      : realtimeStatus === "connecting"
+      ? "⏳"
+      : "🎤";
+  const isRealtimeToggleDisabled =
+    !isRealtimeActive && (isListening || isTranscribingAudio);
 
   const copyTextToClipboard = async (text) => {
     if (!text) {
@@ -1393,6 +1704,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    return () => {
+      stopRealtimeSession();
+    };
+  }, [stopRealtimeSession]);
+
+  useEffect(() => {
     if (
       conversations.length > 0 &&
       !conversations.some((conversation) => conversation.id === activeConversationId)
@@ -1718,6 +2035,60 @@ function App() {
         </main>
 
         <footer className="input-bar">
+          <section className="realtime-voice-panel" aria-label="Dialogue vocal temps réel">
+            <div className="realtime-voice-header">
+              <p className="realtime-voice-title">🗣️ Dialogue vocal temps réel</p>
+              <label className="realtime-voice-voice-picker">
+                Voix
+                <select
+                  value={realtimeVoice}
+                  onChange={handleRealtimeVoiceChange}
+                  disabled={isRealtimeActive || realtimeStatus === "connecting"}
+                  aria-label="Voix synthétique utilisée par Jarvis"
+                >
+                  {REALTIME_VOICES.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="realtime-voice-controls">
+              <button
+                type="button"
+                className={`realtime-voice-button${
+                  isRealtimeActive ? " active" : ""
+                }`}
+                onClick={toggleRealtimeSession}
+                disabled={isRealtimeToggleDisabled}
+                aria-pressed={isRealtimeActive}
+                aria-label={realtimeButtonLabel}
+              >
+                <span aria-hidden="true">{realtimeButtonIcon}</span>
+                <span className="realtime-voice-button-label">{realtimeButtonLabel}</span>
+              </button>
+              <div className={realtimeStatusClassName} role="status" aria-live="polite">
+                <span className="realtime-status-dot" aria-hidden="true" />
+                <span className="realtime-status-text">{realtimeStatusLabel}</span>
+              </div>
+            </div>
+            {realtimeError ? (
+              <p className="realtime-voice-error" role="alert">⚠️ {realtimeError}</p>
+            ) : (
+              <p className="realtime-voice-hint">
+                {isRealtimeActive
+                  ? "Parle librement, Jarvis répond en direct."
+                  : "Clique sur 🎤 pour démarrer un échange vocal instantané."}
+              </p>
+            )}
+            <audio
+              ref={realtimeRemoteAudioRef}
+              className="realtime-audio-element"
+              autoPlay
+              playsInline
+            />
+          </section>
           <div
             className={`input-wrapper ${isDragging ? "dragging" : ""} ${
               isActiveConversationLoading ? "waiting" : ""
@@ -1746,7 +2117,8 @@ function App() {
                 !hasCheckedVoiceSupport ||
                 !isVoiceSupported ||
                 isActiveConversationLoading ||
-                isTranscribingAudio
+                isTranscribingAudio ||
+                isRealtimeActive
               }
               aria-pressed={isListening}
               aria-label={voiceButtonLabel}
