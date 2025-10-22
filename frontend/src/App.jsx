@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 
 const LANGUAGE_ALIASES = {
@@ -157,6 +157,43 @@ const REALTIME_VOICES = [
   { value: "verse", label: "Verse" },
   { value: "alloy", label: "Alloy" },
 ];
+
+const PICOVOICE_WAKE_WORD_LABEL = "Jarvis";
+const PICOVOICE_KEYWORD_PATH = "/keywords/jarvis.ppn";
+const PICOVOICE_SAMPLE_RATE = 16000;
+const PORCUPINE_FRAME_LENGTH = 512;
+const INT16_MAX = 32767;
+
+const arrayBufferToBase64 = (buffer) => {
+  if (!buffer) {
+    return "";
+  }
+
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    const chunk = bytes.subarray(index, index + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+
+  return btoa(binary);
+};
+
+const convertFloatFrameToInt16 = (floatFrame) => {
+  const int16Frame = new Int16Array(floatFrame.length);
+
+  for (let index = 0; index < floatFrame.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, floatFrame[index] ?? 0));
+    int16Frame[index] =
+      sample < 0
+        ? Math.round(sample * (INT16_MAX + 1))
+        : Math.round(sample * INT16_MAX);
+  }
+
+  return int16Frame;
+};
 
 const guessExtensionFromMime = (mimeType) => {
   if (typeof mimeType !== "string") {
@@ -573,9 +610,11 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const [voiceError, setVoiceError] = useState("");
   const [isRealtimeActive, setIsRealtimeActive] = useState(false);
+  const isRealtimeActiveRef = useRef(false);
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   const [realtimeError, setRealtimeError] = useState("");
   const [realtimeVoice, setRealtimeVoice] = useState(REALTIME_VOICES[0].value);
+  const [isWakeWordEnabled, setIsWakeWordEnabled] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -591,7 +630,20 @@ function App() {
   const peerConnectionRef = useRef(null);
   const realtimeStreamRef = useRef(null);
   const realtimeRemoteAudioRef = useRef(null);
+  const porcupineWorkerRef = useRef(null);
+  const wakeWordAudioContextRef = useRef(null);
+  const wakeWordStreamRef = useRef(null);
+  const wakeWordSourceRef = useRef(null);
+  const wakeWordProcessorRef = useRef(null);
+  const wakeWordGainNodeRef = useRef(null);
+  const wakeWordFloatBufferRef = useRef(new Float32Array(0));
+  const wakeWordSetupPromiseRef = useRef(null);
+  const wakeWordSetupTokenRef = useRef(0);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const rawWakeWordAccessKey = import.meta.env.VITE_PICOVOICE_ACCESS_KEY;
+  const wakeWordAccessKey =
+    typeof rawWakeWordAccessKey === "string" ? rawWakeWordAccessKey.trim() : "";
+  const hasWakeWordAccessKey = wakeWordAccessKey.length > 0;
 
   const stopRealtimeSession = useCallback(() => {
     const peerConnection = peerConnectionRef.current;
@@ -634,7 +686,85 @@ function App() {
     }
 
     setIsRealtimeActive(false);
+    isRealtimeActiveRef.current = false;
     setRealtimeStatus("idle");
+  }, []);
+
+  const releaseWakeWordResources = useCallback(() => {
+    wakeWordSetupTokenRef.current += 1;
+
+    const processorNode = wakeWordProcessorRef.current;
+    if (processorNode) {
+      try {
+        processorNode.disconnect();
+      } catch (error) {
+        console.warn("Impossible de déconnecter le ScriptProcessor du mot-clé", error);
+      }
+      processorNode.onaudioprocess = null;
+    }
+    wakeWordProcessorRef.current = null;
+
+    const sourceNode = wakeWordSourceRef.current;
+    if (sourceNode) {
+      try {
+        sourceNode.disconnect();
+      } catch (error) {
+        console.warn("Impossible de déconnecter la source micro du mot-clé", error);
+      }
+    }
+    wakeWordSourceRef.current = null;
+
+    const gainNode = wakeWordGainNodeRef.current;
+    if (gainNode) {
+      try {
+        gainNode.disconnect();
+      } catch (error) {
+        console.warn("Impossible de déconnecter le gain du mot-clé", error);
+      }
+    }
+    wakeWordGainNodeRef.current = null;
+
+    const audioContext = wakeWordAudioContextRef.current;
+    if (audioContext) {
+      if (audioContext.state !== "closed") {
+        audioContext.close().catch((error) => {
+          console.warn("Impossible de fermer l'AudioContext du mot-clé", error);
+        });
+      }
+    }
+    wakeWordAudioContextRef.current = null;
+
+    const stream = wakeWordStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch (error) {
+          console.warn("Impossible d'arrêter une piste micro du mot-clé", error);
+        }
+      });
+    }
+    wakeWordStreamRef.current = null;
+
+    const worker = porcupineWorkerRef.current;
+    if (worker) {
+      try {
+        worker.postMessage({ command: "release" });
+      } catch (error) {
+        console.warn("Impossible d'envoyer la commande release au worker Porcupine", error);
+      }
+
+      try {
+        worker.terminate?.();
+      } catch (error) {
+        console.warn("Impossible de terminer le worker Porcupine", error);
+      }
+
+      worker.onmessage = null;
+    }
+    porcupineWorkerRef.current = null;
+    wakeWordFloatBufferRef.current = new Float32Array(0);
+    wakeWordSetupPromiseRef.current = null;
   }, []);
 
   const cleanupMediaStream = () => {
@@ -684,6 +814,7 @@ function App() {
         try {
           payload = await response.json();
         } catch (parseError) {
+          console.warn("Réponse JSON de transcription invalide", parseError);
           if (response.ok) {
             throw new Error("Réponse de transcription invalide.");
           }
@@ -908,7 +1039,40 @@ function App() {
     }
   };
 
-  const startRealtimeSession = async () => {
+  const handleWakeWordToggle = () => {
+    if (isWakeWordEnabled) {
+      setIsWakeWordEnabled(false);
+      return;
+    }
+
+    if (!hasWakeWordAccessKey) {
+      setVoiceError(
+        "Configure VITE_PICOVOICE_ACCESS_KEY dans frontend/.env pour activer le mot-clé de réveil."
+      );
+      return;
+    }
+
+    setVoiceError((previous) => {
+      if (!previous) {
+        return previous;
+      }
+
+      if (
+        previous.includes("mot-clé") ||
+        previous.includes("Picovoice") ||
+        previous.includes("mode réveil") ||
+        previous.includes("moteur de réveil")
+      ) {
+        return "";
+      }
+
+      return previous;
+    });
+
+    setIsWakeWordEnabled(true);
+  };
+
+  const startRealtimeSession = useCallback(async () => {
     if (
       typeof navigator === "undefined" ||
       !navigator.mediaDevices ||
@@ -917,8 +1081,11 @@ function App() {
       setRealtimeError("Microphone inaccessible dans ce navigateur.");
       setRealtimeStatus("idle");
       setIsRealtimeActive(false);
+      isRealtimeActiveRef.current = false;
       return;
     }
+
+    releaseWakeWordResources();
 
     if (peerConnectionRef.current) {
       stopRealtimeSession();
@@ -926,6 +1093,7 @@ function App() {
 
     setRealtimeError("");
     setRealtimeStatus("connecting");
+    isRealtimeActiveRef.current = true;
     setIsRealtimeActive(true);
 
     let stream;
@@ -941,6 +1109,7 @@ function App() {
 
       setRealtimeError(message);
       setIsRealtimeActive(false);
+      isRealtimeActiveRef.current = false;
       setRealtimeStatus("idle");
       return;
     }
@@ -1113,7 +1282,262 @@ function App() {
       stopRealtimeSession();
       setRealtimeError(message);
     }
-  };
+  }, [releaseWakeWordResources, realtimeVoice, stopRealtimeSession]);
+
+  const initializeWakeWordDetection = useCallback(async () => {
+    if (!isWakeWordEnabled || porcupineWorkerRef.current || wakeWordSetupPromiseRef.current) {
+      return;
+    }
+
+    if (!hasWakeWordAccessKey) {
+      setVoiceError(
+        "Configure VITE_PICOVOICE_ACCESS_KEY dans frontend/.env pour activer le mot-clé de réveil."
+      );
+      return;
+    }
+
+    if (
+      typeof window === "undefined" ||
+      typeof navigator === "undefined" ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== "function"
+    ) {
+      setVoiceError("Le mode réveil nécessite un navigateur avec accès au micro.");
+      return;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+    if (typeof AudioContextClass !== "function") {
+      setVoiceError("Le mode réveil vocal n'est pas supporté sur ce navigateur.");
+      return;
+    }
+
+    const setupToken = wakeWordSetupTokenRef.current;
+    const setupPromise = (async () => {
+      try {
+        const [{ PorcupineWorkerFactory }, keywordResponse] = await Promise.all([
+          import("@picovoice/porcupine-web"),
+          fetch(PICOVOICE_KEYWORD_PATH),
+        ]);
+
+        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+          return;
+        }
+
+        if (!keywordResponse.ok) {
+          throw new Error("keyword-not-found");
+        }
+
+        const keywordBuffer = await keywordResponse.arrayBuffer();
+
+        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+          return;
+        }
+
+        const keywordBase64 = arrayBufferToBase64(keywordBuffer);
+
+        const porcupineWorker = await PorcupineWorkerFactory.create(
+          wakeWordAccessKey,
+          [
+            {
+              label: PICOVOICE_WAKE_WORD_LABEL,
+              sensitivity: 0.6,
+              custom: {
+                base64: keywordBase64,
+              },
+            },
+          ],
+          {
+            processErrorCallback: (error) => {
+              console.error("Erreur Porcupine", error);
+              setVoiceError(
+                "Erreur du moteur de réveil vocal. Rafraîchis la page ou vérifie le fichier .ppn."
+              );
+            },
+          }
+        );
+
+        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+          try {
+            porcupineWorker.postMessage?.({ command: "release" });
+          } catch (error) {
+            console.warn("Impossible de relâcher le worker Porcupine après annulation", error);
+          }
+          porcupineWorker.terminate?.();
+          return;
+        }
+
+        porcupineWorkerRef.current = porcupineWorker;
+
+        porcupineWorker.onmessage = (event) => {
+          const payload = event?.data;
+          if (!payload) {
+            return;
+          }
+
+          const detectedKeyword =
+            typeof payload === "number" ||
+            payload?.command === "keyword" ||
+            payload?.keywordLabel ||
+            payload?.label;
+
+          if (detectedKeyword) {
+            if (isRealtimeActiveRef.current) {
+              return;
+            }
+
+            releaseWakeWordResources();
+            startRealtimeSession();
+            return;
+          }
+
+          if (payload?.command === "error") {
+            console.error(
+              "Erreur renvoyée par le worker Porcupine",
+              payload?.message ?? payload
+            );
+            setVoiceError(
+              "Erreur du moteur de réveil vocal. Rafraîchis la page ou vérifie le fichier .ppn."
+            );
+          }
+        };
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: PICOVOICE_SAMPLE_RATE,
+          },
+        });
+
+        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+          stream.getTracks().forEach((track) => {
+            try {
+              track.stop();
+            } catch (error) {
+              console.warn("Impossible d'arrêter une piste micro après annulation", error);
+            }
+          });
+          return;
+        }
+
+        wakeWordStreamRef.current = stream;
+
+        const audioContext = new AudioContextClass({
+          latencyHint: "interactive",
+          sampleRate: PICOVOICE_SAMPLE_RATE,
+        });
+        wakeWordAudioContextRef.current = audioContext;
+
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        wakeWordSourceRef.current = sourceNode;
+
+        const processorNode = audioContext.createScriptProcessor(
+          PORCUPINE_FRAME_LENGTH,
+          1,
+          1
+        );
+        wakeWordProcessorRef.current = processorNode;
+
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 0;
+        wakeWordGainNodeRef.current = gainNode;
+
+        wakeWordFloatBufferRef.current = new Float32Array(0);
+
+        processorNode.onaudioprocess = (event) => {
+          const worker = porcupineWorkerRef.current;
+          if (!worker) {
+            return;
+          }
+
+          const inputFrame = event.inputBuffer.getChannelData(0);
+          const previous = wakeWordFloatBufferRef.current;
+          const merged = new Float32Array(previous.length + inputFrame.length);
+          merged.set(previous);
+          merged.set(inputFrame, previous.length);
+
+          let offset = 0;
+          while (offset + PORCUPINE_FRAME_LENGTH <= merged.length) {
+            const frameSlice = merged.subarray(offset, offset + PORCUPINE_FRAME_LENGTH);
+            const int16Frame = convertFloatFrameToInt16(frameSlice);
+            try {
+              worker.postMessage(
+                { command: "process", inputFrame: int16Frame },
+                [int16Frame.buffer]
+              );
+            } catch (error) {
+              console.error(
+                "Impossible d'envoyer les données audio au worker Porcupine",
+                error
+              );
+            }
+            offset += PORCUPINE_FRAME_LENGTH;
+          }
+
+          wakeWordFloatBufferRef.current = merged.slice(offset);
+        };
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        if (audioContext.state === "suspended") {
+          try {
+            await audioContext.resume();
+          } catch (error) {
+            console.warn("Impossible de reprendre l'AudioContext pour le mode réveil", error);
+          }
+        }
+
+        setVoiceError((previous) => {
+          if (!previous) {
+            return previous;
+          }
+
+          if (
+            previous.includes("mot-clé") ||
+            previous.includes("Picovoice") ||
+            previous.includes("mode réveil") ||
+            previous.includes("moteur de réveil")
+          ) {
+            return "";
+          }
+
+          return previous;
+        });
+      } catch (error) {
+        if (error?.message === "keyword-not-found") {
+          setVoiceError(
+            "Mot-clé Porcupine introuvable. Place le fichier .ppn dans frontend/public/keywords/."
+          );
+        } else if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+          setVoiceError(
+            "Accès au micro refusé pour le mode réveil. Vérifie les autorisations du navigateur."
+          );
+        } else if (error?.name === "NotFoundError") {
+          setVoiceError("Aucun micro disponible pour activer le mode réveil.");
+        } else {
+          console.error("Impossible d'initialiser le mode réveil vocal", error);
+          setVoiceError("Impossible d'activer le mode réveil vocal.");
+        }
+
+        releaseWakeWordResources();
+      } finally {
+        wakeWordSetupPromiseRef.current = null;
+      }
+    })();
+
+    wakeWordSetupPromiseRef.current = setupPromise;
+
+    return setupPromise;
+  }, [
+    hasWakeWordAccessKey,
+    isWakeWordEnabled,
+    releaseWakeWordResources,
+    startRealtimeSession,
+    wakeWordAccessKey,
+  ]);
 
   const toggleRealtimeSession = () => {
     if (isRealtimeActive) {
@@ -1293,7 +1717,10 @@ function App() {
   const activeConversation =
     conversations.find((conversation) => conversation.id === activeConversationId) ??
     conversations[0];
-  const messages = activeConversation?.messages ?? [];
+  const messages = useMemo(
+    () => activeConversation?.messages ?? [],
+    [activeConversation]
+  );
   const isActiveConversationLoading = loadingConversationIds.includes(
     activeConversationId
   );
@@ -1314,6 +1741,16 @@ function App() {
     : isRealtimeActive
     ? "La session vocale temps réel est en cours."
     : voiceButtonLabel;
+  const wakeWordButtonLabel = isWakeWordEnabled
+    ? "Désactiver le mode réveil"
+    : "Activer le mode réveil";
+  const wakeWordButtonTitle = !hasWakeWordAccessKey
+    ? "Ajoute VITE_PICOVOICE_ACCESS_KEY dans frontend/.env pour activer le mode réveil."
+    : isWakeWordEnabled
+    ? "Le mode réveil est actif : dis ton mot-clé pour lancer Jarvis."
+    : "Active le mot-clé Jarvis pour démarrer automatiquement la session vocale.";
+  const wakeWordButtonIcon = isWakeWordEnabled ? "🛑" : "👂";
+  const isWakeWordToggleDisabled = !hasWakeWordAccessKey || isTranscribingAudio;
 
   const realtimeStatusLabel = (() => {
     switch (realtimeStatus) {
@@ -1708,6 +2145,26 @@ function App() {
       stopRealtimeSession();
     };
   }, [stopRealtimeSession]);
+
+  useEffect(() => {
+    if (!isWakeWordEnabled) {
+      releaseWakeWordResources();
+    }
+  }, [isWakeWordEnabled, releaseWakeWordResources]);
+
+  useEffect(() => {
+    if (!isWakeWordEnabled || isRealtimeActive) {
+      return;
+    }
+
+    initializeWakeWordDetection();
+  }, [initializeWakeWordDetection, isRealtimeActive, isWakeWordEnabled]);
+
+  useEffect(() => {
+    return () => {
+      releaseWakeWordResources();
+    };
+  }, [releaseWakeWordResources]);
 
   useEffect(() => {
     if (
@@ -2109,6 +2566,20 @@ function App() {
             </label>
             <button
               type="button"
+              className={`wake-word-toggle${isWakeWordEnabled ? " active" : ""}`}
+              onClick={handleWakeWordToggle}
+              disabled={isWakeWordToggleDisabled}
+              aria-pressed={isWakeWordEnabled}
+              aria-label={wakeWordButtonLabel}
+              title={wakeWordButtonTitle}
+            >
+              <span className="wake-word-toggle-icon" aria-hidden="true">
+                {wakeWordButtonIcon}
+              </span>
+              <span className="wake-word-toggle-text">Réveil</span>
+            </button>
+            <button
+              type="button"
               className={`voice-input-button${
                 isListening ? " listening" : ""
               }`}
@@ -2177,6 +2648,15 @@ function App() {
               🎙️ Transcription de l'audio en cours…
             </div>
           )}
+          {isWakeWordEnabled &&
+            !isRealtimeActive &&
+            !isListening &&
+            !isTranscribingAudio &&
+            !voiceError && (
+              <div className="voice-support-hint active" role="status">
+                👂 Mode réveil activé — dis ton mot-clé pour lancer Jarvis.
+              </div>
+            )}
           {voiceError && (
             <div className="voice-support-hint error" role="alert">
               🎙️ {voiceError}
