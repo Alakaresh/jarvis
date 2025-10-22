@@ -392,6 +392,25 @@ const splitIntoParagraphs = (text) => {
   return paragraphs.filter((paragraph) => paragraph.trim() !== "");
 };
 
+const joinWithSpace = (left, right) => {
+  const safeLeft = typeof left === "string" ? left : "";
+  const safeRight = typeof right === "string" ? right : "";
+
+  if (!safeRight) {
+    return safeLeft;
+  }
+
+  if (!safeLeft) {
+    return safeRight;
+  }
+
+  if (/\s$/.test(safeLeft) || /^\s/.test(safeRight)) {
+    return `${safeLeft}${safeRight}`;
+  }
+
+  return `${safeLeft} ${safeRight}`;
+};
+
 const createInlineElements = (text, keyBase) => {
   if (!text) {
     return [];
@@ -513,11 +532,71 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const [isVoiceSupported, setIsVoiceSupported] = useState(false);
+  const [hasCheckedVoiceSupport, setHasCheckedVoiceSupport] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceError, setVoiceError] = useState("");
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
   const copyTimeoutRef = useRef(null);
+  const recognitionRef = useRef(null);
+  const voiceCaptureStateRef = useRef({ base: "", final: "" });
+
+  const stopVoiceRecognition = () => {
+    const recognition = recognitionRef.current;
+
+    if (!recognition) {
+      return;
+    }
+
+    try {
+      recognition.stop();
+    } catch (error) {
+      if (error?.name !== "InvalidStateError") {
+        console.warn("Impossible d'arrêter la dictée vocale", error);
+      }
+    }
+  };
+
+  const startVoiceRecognition = () => {
+    const recognition = recognitionRef.current;
+
+    if (!recognition || !isVoiceSupported) {
+      return;
+    }
+
+    voiceCaptureStateRef.current = {
+      base: input,
+      final: "",
+    };
+
+    setVoiceError("");
+
+    try {
+      recognition.start();
+    } catch (error) {
+      if (error?.name !== "InvalidStateError") {
+        console.error("Impossible de démarrer la dictée vocale", error);
+        setVoiceError(
+          "Impossible de démarrer la dictée vocale. Vérifie ton micro."
+        );
+      }
+    }
+  };
+
+  const toggleVoiceRecognition = () => {
+    if (!isVoiceSupported) {
+      return;
+    }
+
+    if (isListening) {
+      stopVoiceRecognition();
+    } else {
+      startVoiceRecognition();
+    }
+  };
 
   const clearCopyFeedback = () => {
     if (copyTimeoutRef.current) {
@@ -528,8 +607,10 @@ function App() {
   };
 
   const resetComposer = () => {
+    stopVoiceRecognition();
     setInput("");
     setSelectedFiles([]);
+    setVoiceError("");
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
@@ -676,6 +757,15 @@ function App() {
   const isActiveConversationLoading = loadingConversationIds.includes(
     activeConversationId
   );
+
+  const voiceButtonLabel = isListening
+    ? "Arrêter la dictée vocale"
+    : "Activer la dictée vocale";
+  const voiceButtonTitle = !hasCheckedVoiceSupport
+    ? "Vérification du micro en cours..."
+    : !isVoiceSupported
+    ? "La commande vocale n'est pas disponible sur ce navigateur"
+    : voiceButtonLabel;
 
   const copyTextToClipboard = async (text) => {
     if (!text) {
@@ -873,6 +963,140 @@ function App() {
   };
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setIsVoiceSupported(false);
+      setHasCheckedVoiceSupport(true);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "fr-FR";
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      setIsListening(true);
+      setVoiceError("");
+    };
+
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+      let finalTranscript = "";
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcript = result[0]?.transcript ?? "";
+
+        if (!transcript) {
+          continue;
+        }
+
+        if (result.isFinal) {
+          finalTranscript = joinWithSpace(
+            finalTranscript,
+            transcript.trim()
+          );
+        } else {
+          interimTranscript = joinWithSpace(
+            interimTranscript,
+            transcript.trim()
+          );
+        }
+      }
+
+      if (!finalTranscript && !interimTranscript) {
+        return;
+      }
+
+      if (finalTranscript) {
+        voiceCaptureStateRef.current = {
+          ...voiceCaptureStateRef.current,
+          final: joinWithSpace(
+            voiceCaptureStateRef.current.final,
+            finalTranscript
+          ),
+        };
+      }
+
+      const combinedText = joinWithSpace(
+        voiceCaptureStateRef.current.base,
+        joinWithSpace(voiceCaptureStateRef.current.final, interimTranscript)
+      );
+
+      setInput(combinedText);
+      setVoiceError("");
+    };
+
+    recognition.onerror = (event) => {
+      let message = "La dictée vocale a rencontré une erreur.";
+
+      switch (event.error) {
+        case "not-allowed":
+        case "service-not-allowed":
+          message =
+            "Accès au micro refusé. Vérifie les autorisations du navigateur.";
+          break;
+        case "no-speech":
+          message = "Aucun son détecté. Réessaie.";
+          break;
+        case "audio-capture":
+          message = "Microphone introuvable ou occupé.";
+          break;
+        default:
+          break;
+      }
+
+      setIsListening(false);
+      setVoiceError(message);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      setInput((previousInput) => {
+        const finalText = joinWithSpace(
+          voiceCaptureStateRef.current.base,
+          voiceCaptureStateRef.current.final
+        );
+        return finalText || previousInput;
+      });
+      voiceCaptureStateRef.current = { base: "", final: "" };
+    };
+
+    recognitionRef.current = recognition;
+    setIsVoiceSupported(true);
+    setHasCheckedVoiceSupport(true);
+
+    return () => {
+      recognition.onstart = null;
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+
+      try {
+        recognition.stop();
+      } catch (error) {
+        if (error?.name !== "InvalidStateError") {
+          console.warn(
+            "Impossible d'arrêter la dictée vocale lors du nettoyage",
+            error
+          );
+        }
+      }
+
+      recognitionRef.current = null;
+      voiceCaptureStateRef.current = { base: "", final: "" };
+      setIsListening(false);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       clearCopyFeedback();
     };
@@ -888,6 +1112,10 @@ function App() {
   }, [conversations, activeConversationId]);
 
   const sendMessage = async () => {
+    if (isListening) {
+      stopVoiceRecognition();
+    }
+
     const trimmedInput = input.trim();
     const hasAttachments = selectedFiles.length > 0;
 
@@ -1218,6 +1446,21 @@ function App() {
                 onChange={handleFileChange}
               />
             </label>
+            <button
+              type="button"
+              className={`voice-input-button${
+                isListening ? " listening" : ""
+              }`}
+              onClick={toggleVoiceRecognition}
+              disabled={
+                !hasCheckedVoiceSupport || !isVoiceSupported || isActiveConversationLoading
+              }
+              aria-pressed={isListening}
+              aria-label={voiceButtonLabel}
+              title={voiceButtonTitle}
+            >
+              <span aria-hidden="true">{isListening ? "⏹️" : "🎙️"}</span>
+            </button>
             <input
               type="text"
               value={input}
@@ -1255,6 +1498,21 @@ function App() {
                   </button>
                 </span>
               ))}
+            </div>
+          )}
+          {isListening && (
+            <div className="voice-support-hint active" role="status">
+              🎙️ Dictée vocale en cours… parle librement.
+            </div>
+          )}
+          {voiceError && (
+            <div className="voice-support-hint error" role="alert">
+              🎙️ {voiceError}
+            </div>
+          )}
+          {hasCheckedVoiceSupport && !isVoiceSupported && !voiceError && (
+            <div className="voice-support-hint" role="note">
+              🎙️ La commande vocale nécessite un navigateur compatible (Chrome, Edge…).
             </div>
           )}
         </footer>
