@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import sys
+from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 
 # Ensure the "backend" package can be imported when the module is executed
 # directly (e.g. via ``uvicorn main:app`` from inside the ``backend`` folder).
@@ -150,6 +153,147 @@ def _initialise_memory() -> None:
 
 
 _initialise_memory()
+
+
+_OPENAI_REALTIME_URL = "https://api.openai.com/v1/realtime"
+
+
+_realtime_logger = logging.getLogger("jarvis.realtime")
+if not _realtime_logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] [realtime] %(message)s")
+    )
+    _realtime_logger.addHandler(_handler)
+_realtime_logger.setLevel(logging.INFO)
+_realtime_logger.propagate = False
+
+
+def _resolve_realtime_model(requested_model: str | None = None) -> str:
+    """Return the realtime model to use for the current session."""
+
+    if requested_model:
+        return requested_model
+
+    return settings.openai_realtime_model or "gpt-4o-realtime-preview"
+
+
+def _resolve_realtime_header(value: str | None, fallback: str | None) -> str | None:
+    """Return the first non-empty header value."""
+
+    candidate = (value or "").strip() or None
+    if candidate:
+        return candidate
+
+    if fallback:
+        fallback_value = fallback.strip()
+        return fallback_value or None
+
+    return None
+
+
+@app.post("/api/realtime/session", response_class=PlainTextResponse)
+async def create_realtime_session(
+    request: Request,
+    voice: str | None = None,
+    language: str | None = None,
+    model: str | None = None,
+) -> PlainTextResponse:
+    """Proxy a WebRTC SDP offer to OpenAI's realtime API and return the answer SDP."""
+
+    session_identifier = uuid4().hex[:8]
+    _realtime_logger.info(
+        "Session %s: réception d'une offre SDP (voice=%s, language=%s, model=%s)",
+        session_identifier,
+        voice or "(défaut)",
+        language or "(défaut)",
+        model or "(défaut)",
+    )
+
+    if not settings.openai_api_key:
+        _realtime_logger.warning(
+            "Session %s: aucune clé API OpenAI configurée, retour 503",
+            session_identifier,
+        )
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Le service temps réel est indisponible : aucune clé API OpenAI n'est configurée.",
+        )
+
+    offer_payload = await request.body()
+
+    if not offer_payload or not offer_payload.strip():
+        _realtime_logger.warning(
+            "Session %s: offre SDP vide reçue, retour 400",
+            session_identifier,
+        )
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Le corps de la requête doit contenir une offre SDP valide.",
+        )
+
+    resolved_model = _resolve_realtime_model(model)
+    resolved_voice = _resolve_realtime_header(voice, settings.openai_realtime_voice)
+    resolved_language = _resolve_realtime_header(
+        language, settings.openai_realtime_language
+    )
+
+    headers = {
+        "Authorization": f"Bearer {settings.openai_api_key}",
+        "OpenAI-Beta": "realtime=v1",
+        "Content-Type": "application/sdp",
+    }
+
+    if resolved_voice:
+        headers["OpenAI-Voice"] = resolved_voice
+
+    if resolved_language:
+        headers["OpenAI-Language"] = resolved_language
+
+    params = {"model": resolved_model}
+
+    try:
+        _realtime_logger.info(
+            "Session %s: transmission de l'offre à OpenAI (taille=%d octets, modèle=%s)",
+            session_identifier,
+            len(offer_payload),
+            resolved_model,
+        )
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as client:
+            response = await client.post(
+                _OPENAI_REALTIME_URL,
+                params=params,
+                headers=headers,
+                content=offer_payload,
+            )
+    except httpx.HTTPError as exc:  # pragma: no cover - network errors
+        _realtime_logger.exception(
+            "Session %s: erreur réseau lors de la connexion à l'API realtime",
+            session_identifier,
+        )
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            "Impossible de contacter l'API Realtime d'OpenAI.",
+        ) from exc
+
+    if response.status_code >= 400:
+        detail = response.text or "Réponse inconnue de l'API Realtime."
+        truncated_detail = detail[:400]
+        _realtime_logger.warning(
+            "Session %s: réponse d'erreur d'OpenAI (%s) : %s",
+            session_identifier,
+            response.status_code,
+            truncated_detail,
+        )
+        raise HTTPException(response.status_code, detail)
+
+    _realtime_logger.info(
+        "Session %s: réponse SDP reçue (%d octets)",
+        session_identifier,
+        len(response.content or b""),
+    )
+
+    return PlainTextResponse(response.text, media_type="application/sdp")
 
 
 @app.post("/chat")

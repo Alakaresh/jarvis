@@ -17,6 +17,15 @@ class Settings:
         self.ai_provider: str = overrides.get("ai_provider", env("AI_PROVIDER", "openai"))
         self.openai_api_key: str | None = overrides.get("openai_api_key", env("OPENAI_API_KEY"))
         self.openai_model: str = overrides.get("openai_model", env("OPENAI_MODEL", "gpt-4o-mini"))
+        self.openai_realtime_model: str = overrides.get(
+            "openai_realtime_model", env("OPENAI_REALTIME_MODEL", "gpt-4o-realtime-preview")
+        )
+        self.openai_realtime_voice: str | None = overrides.get(
+            "openai_realtime_voice", env("OPENAI_REALTIME_VOICE", "alloy")
+        )
+        self.openai_realtime_language: str | None = overrides.get(
+            "openai_realtime_language", env("OPENAI_REALTIME_LANGUAGE")
+        )
         self.huggingface_api_key: str | None = overrides.get(
             "huggingface_api_key", env("HUGGINGFACE_API_KEY")
         )
@@ -30,6 +39,9 @@ class Settings:
             "ai_provider": self.ai_provider,
             "openai_api_key": self.openai_api_key,
             "openai_model": self.openai_model,
+            "openai_realtime_model": self.openai_realtime_model,
+            "openai_realtime_voice": self.openai_realtime_voice,
+            "openai_realtime_language": self.openai_realtime_language,
             "huggingface_api_key": self.huggingface_api_key,
             "huggingface_model": self.huggingface_model,
         }
