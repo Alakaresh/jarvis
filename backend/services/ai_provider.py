@@ -4,7 +4,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Iterable, Protocol, runtime_checkable
 import httpx
 from openai import OpenAI  # ✅ Nouveau SDK officiel
 
@@ -39,6 +39,11 @@ class AIProvider(Protocol):
     def generate_response(self, prompt: str, attachments: list[Attachment] | None = None) -> str:
         """Generate a textual response for the given prompt."""
 
+    def stream_response(
+        self, prompt: str, attachments: list[Attachment] | None = None
+    ) -> Iterable[str]:
+        """Yield chunks of a response for the given prompt."""
+
 
 # === Implémentation OpenAI (nouveau SDK) ===
 @dataclass
@@ -55,50 +60,61 @@ class OpenAIProvider:
         # Création du client OpenAI une fois pour toutes
         self.client = OpenAI(api_key=self.api_key)
 
+    def _create_input_content(
+        self, prompt: str, attachments: list[Attachment] | None
+    ) -> list[dict[str, str]]:
+        input_content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
+
+        for attachment in attachments or []:
+            mime_type = attachment.content_type or mimetypes.guess_type(attachment.filename)[0]
+            encoded_data = base64.b64encode(attachment.content).decode("utf-8")
+
+            if mime_type and mime_type.startswith("image/"):
+                data_uri = f"data:{mime_type};base64,{encoded_data}"
+                input_content.append({"type": "input_image", "image_url": data_uri})
+            else:
+                file_payload: dict[str, str] = {
+                    "type": "input_file",
+                    "file_data": encoded_data,
+                }
+                if attachment.filename:
+                    file_payload["filename"] = attachment.filename
+                input_content.append(file_payload)
+
+        return input_content
+
+    def stream_response(
+        self, prompt: str, attachments: list[Attachment] | None = None
+    ) -> Iterable[str]:
+        try:
+            input_content = self._create_input_content(prompt, attachments)
+
+            with self.client.responses.stream(
+                model=self.model,
+                input=[{"role": "user", "content": input_content}],
+                instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
+            ) as stream:
+                for event in stream:
+                    if event.type == "response.output_text.delta":
+                        delta = event.delta or ""
+                        if delta:
+                            yield delta
+                    elif event.type == "response.error":
+                        raise ProviderRequestError(event.error.message)
+
+                stream.until_done()
+
+        except ProviderRequestError:
+            raise
+        except Exception as exc:
+            print("❌ Erreur OpenAI:", exc)
+            raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
+
     def generate_response(
         self, prompt: str, attachments: list[Attachment] | None = None
     ) -> str:
-            try:
-                input_content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
-        
-                for attachment in attachments or []:
-                    mime_type = attachment.content_type or mimetypes.guess_type(attachment.filename)[0]
-                    encoded_data = base64.b64encode(attachment.content).decode("utf-8")
-        
-                    if mime_type and mime_type.startswith("image/"):
-                        data_uri = f"data:{mime_type};base64,{encoded_data}"
-                        input_content.append({"type": "input_image", "image_url": data_uri})
-                    else:
-                        file_payload: dict[str, str] = {
-                            "type": "input_file",
-                            "file_data": encoded_data,
-                        }
-                        if attachment.filename:
-                            file_payload["filename"] = attachment.filename
-                        input_content.append(file_payload)
-        
-                # === STREAMING ===
-                final_text = ""
-                with self.client.responses.stream(
-                    model=self.model,
-                    input=[{"role": "user", "content": input_content}],
-                    instructions="Tu es Jarvis, une IA personnelle utile et amicale.",
-                ) as stream:
-                    for event in stream:
-                        if event.type == "response.output_text.delta":
-                            delta = event.delta
-                            print(delta, end="", flush=True)  # ⚡ affiche au fur et à mesure
-                            final_text += delta
-                        elif event.type == "response.error":
-                            raise ProviderRequestError(event.error.message)
-        
-                    stream.until_done()  # attendre la fin
-        
-                return final_text.strip() or "(Réponse vide)"
-        
-            except Exception as exc:
-                print("❌ Erreur OpenAI:", exc)
-                raise ProviderRequestError("Failed to fetch a response from OpenAI") from exc
+        final_text = "".join(self.stream_response(prompt, attachments)).strip()
+        return final_text or "(Réponse vide)"
         
 
 
@@ -138,6 +154,11 @@ class HuggingFaceProvider:
                 return generated_text
 
         raise ProviderRequestError("Unexpected response structure from Hugging Face")
+
+    def stream_response(
+        self, prompt: str, attachments: list[Attachment] | None = None
+    ) -> Iterable[str]:
+        yield self.generate_response(prompt, attachments)
 
 
 # === Factory ===

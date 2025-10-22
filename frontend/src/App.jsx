@@ -601,6 +601,41 @@ function App() {
     });
   };
 
+  const updateLastMessageInConversation = (conversationId, updater) => {
+    setConversations((previousConversations) => {
+      const existingConversation = previousConversations.find(
+        (conversation) => conversation.id === conversationId
+      );
+
+      if (!existingConversation || existingConversation.messages.length === 0) {
+        return previousConversations;
+      }
+
+      const lastIndex = existingConversation.messages.length - 1;
+      const currentMessage = existingConversation.messages[lastIndex];
+      const updates = updater(currentMessage);
+
+      if (!updates) {
+        return previousConversations;
+      }
+
+      const updatedMessage = { ...currentMessage, ...updates };
+      const updatedConversation = {
+        ...existingConversation,
+        messages: [
+          ...existingConversation.messages.slice(0, lastIndex),
+          updatedMessage,
+        ],
+      };
+
+      const remainingConversations = previousConversations.filter(
+        (conversation) => conversation.id !== conversationId
+      );
+
+      return [updatedConversation, ...remainingConversations];
+    });
+  };
+
   const handleSelectConversation = (conversationId) => {
     if (conversationId === activeConversationId) {
       return;
@@ -700,8 +735,12 @@ function App() {
     }, 2000);
   };
 
-  const renderMessageContent = (text, messageIndex) => {
-    if (!text) return null;
+  const renderMessageContent = (message, messageIndex) => {
+    const rawText =
+      typeof message?.text === "string" ? message.text : "";
+    const isStreaming = Boolean(message?.isStreaming);
+
+    const hasRawText = rawText.length > 0;
 
     const normaliseNewlines = (value) => value.replace(/\r\n/g, "\n");
     const codeBlockRegex = /```([^\n\r]*)\r?\n?([\s\S]*?)```/g;
@@ -710,27 +749,32 @@ function App() {
     let lastIndex = 0;
     let match;
 
-    while ((match = codeBlockRegex.exec(text)) !== null) {
-      if (match.index > lastIndex) {
-        const plainText = text.slice(lastIndex, match.index);
-        segments.push({ type: "text", content: normaliseNewlines(plainText) });
+    if (hasRawText) {
+      while ((match = codeBlockRegex.exec(rawText)) !== null) {
+        if (match.index > lastIndex) {
+          const plainText = rawText.slice(lastIndex, match.index);
+          segments.push({ type: "text", content: normaliseNewlines(plainText) });
+        }
+
+        const language = match[1]?.trim();
+        const codeContent = normaliseNewlines(match[2] ?? "");
+
+        segments.push({
+          type: "code",
+          content: codeContent,
+          language: language || undefined,
+        });
+
+        lastIndex = match.index + match[0].length;
       }
 
-      const language = match[1]?.trim();
-      const codeContent = normaliseNewlines(match[2] ?? "");
-
-      segments.push({
-        type: "code",
-        content: codeContent,
-        language: language || undefined,
-      });
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    if (lastIndex < text.length) {
-      const remainingText = text.slice(lastIndex);
-      segments.push({ type: "text", content: normaliseNewlines(remainingText) });
+      if (lastIndex < rawText.length) {
+        const remainingText = rawText.slice(lastIndex);
+        segments.push({
+          type: "text",
+          content: normaliseNewlines(remainingText),
+        });
+      }
     }
 
     const visibleSegments = segments.filter((segment) => {
@@ -741,63 +785,89 @@ function App() {
       return segment.content.trim() !== "";
     });
 
-    if (visibleSegments.length === 0) {
+    const hasVisibleSegments = visibleSegments.length > 0;
+
+    if (!hasVisibleSegments && !isStreaming) {
       return null;
     }
 
     return (
       <div className="message-content">
-        {visibleSegments.map((segment, index) => {
-          if (segment.type === "code") {
-            const codeKey = `${messageIndex}-code-${index}`;
-            const rawLanguage = segment.language?.trim();
-            const canonicalLanguage = normaliseLanguage(rawLanguage);
-            const displayLanguage = (rawLanguage || canonicalLanguage)?.toUpperCase();
-            const highlightedCode = highlightCode(segment.content, canonicalLanguage);
+        {hasVisibleSegments &&
+          visibleSegments.map((segment, index) => {
+            if (segment.type === "code") {
+              const codeKey = `${messageIndex}-code-${index}`;
+              const rawLanguage = segment.language?.trim();
+              const canonicalLanguage = normaliseLanguage(rawLanguage);
+              const displayLanguage =
+                (rawLanguage || canonicalLanguage)?.toUpperCase();
+              const highlightedCode = highlightCode(
+                segment.content,
+                canonicalLanguage
+              );
+
+              return (
+                <div key={codeKey} className="message-code-wrapper">
+                  <div className="code-toolbar">
+                    <div className="code-toolbar-meta" aria-hidden="true">
+                      <span className="toolbar-dot" />
+                      <span className="toolbar-dot" />
+                      <span className="toolbar-dot" />
+                      {displayLanguage ? (
+                        <span className="toolbar-language">{displayLanguage}</span>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      className={`copy-button ${
+                        copiedCodeKey === codeKey ? "copied" : ""
+                      }`}
+                      onClick={() => handleCopyCode(segment.content, codeKey)}
+                      aria-label="Copier ce bloc de code"
+                    >
+                      {copiedCodeKey === codeKey ? "✅ Copié !" : "Copier le code"}
+                    </button>
+                  </div>
+                  <pre
+                    className="message-code-block"
+                    data-language={displayLanguage || undefined}
+                  >
+                    <code
+                      className={`code-content${
+                        canonicalLanguage ? ` language-${canonicalLanguage}` : ""
+                      }`}
+                      dangerouslySetInnerHTML={{ __html: highlightedCode }}
+                    />
+                  </pre>
+                </div>
+              );
+            }
 
             return (
-              <div key={codeKey} className="message-code-wrapper">
-                <div className="code-toolbar">
-                  <div className="code-toolbar-meta" aria-hidden="true">
-                    <span className="toolbar-dot" />
-                    <span className="toolbar-dot" />
-                    <span className="toolbar-dot" />
-                    {displayLanguage ? (
-                      <span className="toolbar-language">{displayLanguage}</span>
-                    ) : null}
-                  </div>
-                  <button
-                    type="button"
-                    className={`copy-button ${
-                      copiedCodeKey === codeKey ? "copied" : ""
-                    }`}
-                    onClick={() => handleCopyCode(segment.content, codeKey)}
-                    aria-label="Copier ce bloc de code"
-                  >
-                    {copiedCodeKey === codeKey ? "✅ Copié !" : "Copier le code"}
-                  </button>
-                </div>
-                <pre
-                  className="message-code-block"
-                  data-language={displayLanguage || undefined}
-                >
-                  <code
-                    className={`code-content${
-                      canonicalLanguage ? ` language-${canonicalLanguage}` : ""
-                    }`}
-                    dangerouslySetInnerHTML={{ __html: highlightedCode }}
-                  />
-                </pre>
-              </div>
+              <Fragment key={`text-${index}`}>
+                {renderRichText(
+                  segment.content,
+                  `${messageIndex}-text-${index}`
+                )}
+              </Fragment>
             );
-          }
-
-          return (
-            <Fragment key={`text-${index}`}>
-              {renderRichText(segment.content, `${messageIndex}-text-${index}`)}
-            </Fragment>
-          );
-        })}
+          })}
+        {isStreaming && (
+          <div
+            className="streaming-indicator"
+            role="status"
+            aria-live="polite"
+          >
+            {!hasVisibleSegments && (
+              <span className="streaming-label">Jarvis rédige une réponse</span>
+            )}
+            <span className="streaming-dots" aria-hidden="true">
+              <span className="streaming-dot" />
+              <span className="streaming-dot" />
+              <span className="streaming-dot" />
+            </span>
+          </div>
+        )}
       </div>
     );
   };
@@ -860,11 +930,19 @@ function App() {
         return [...previousIds, conversationIdForRequest];
       });
 
+      const placeholderBotMessage = {
+        sender: "bot",
+        text: "",
+        isStreaming: true,
+      };
+      appendMessageToConversation(conversationIdForRequest, placeholderBotMessage);
+
       const formData = new FormData();
       formData.append("text", messageText);
       filesToSend.forEach((file) => {
         formData.append("files", file);
       });
+      formData.append("stream", "true");
 
       const res = await fetch("http://127.0.0.1:8000/chat", {
         method: "POST",
@@ -875,15 +953,68 @@ function App() {
         throw new Error(`Erreur serveur (${res.status})`);
       }
 
-      const data = await res.json();
-      const botMsg = { sender: "bot", text: data.response };
-      appendMessageToConversation(conversationIdForRequest, botMsg);
-    } catch {
-      const errMsg = {
-        sender: "bot",
+      const contentType = res.headers.get("content-type") || "";
+      const isTextResponse = contentType.includes("text/");
+      const isJsonResponse = contentType.includes("application/json");
+      const textDecoder = new TextDecoder();
+      let aggregatedResponse = "";
+
+      if (res.body && isTextResponse) {
+        const reader = res.body.getReader();
+
+        while (true) {
+          const { value, done } = await reader.read();
+
+          if (value) {
+            const chunkValue = textDecoder.decode(value, { stream: !done });
+            if (chunkValue) {
+              aggregatedResponse += chunkValue;
+              updateLastMessageInConversation(
+                conversationIdForRequest,
+                (current) => ({
+                  text: `${current.text || ""}${chunkValue}`,
+                })
+              );
+            }
+          }
+
+          if (done) {
+            break;
+          }
+        }
+
+        const tail = textDecoder.decode();
+        if (tail) {
+          aggregatedResponse += tail;
+          updateLastMessageInConversation(conversationIdForRequest, (current) => ({
+            text: `${current.text || ""}${tail}`,
+          }));
+        }
+      } else if (isJsonResponse) {
+        const data = await res.json();
+        aggregatedResponse =
+          typeof data?.response === "string"
+            ? data.response
+            : JSON.stringify(data);
+      } else {
+        aggregatedResponse = await res.text();
+      }
+
+      const finalResponseText =
+        aggregatedResponse && aggregatedResponse.trim().length > 0
+          ? aggregatedResponse
+          : "(Réponse vide)";
+
+      updateLastMessageInConversation(conversationIdForRequest, () => ({
+        text: finalResponseText,
+        isStreaming: false,
+      }));
+    } catch (error) {
+      console.error("Erreur lors de l'envoi du message", error);
+      updateLastMessageInConversation(conversationIdForRequest, () => ({
         text: "⚠️ Erreur : impossible de contacter le serveur.",
-      };
-      appendMessageToConversation(conversationIdForRequest, errMsg);
+        isStreaming: false,
+      }));
     } finally {
       setLoadingConversationIds((previousIds) =>
         previousIds.filter((id) => id !== conversationIdForRequest)
@@ -979,7 +1110,9 @@ function App() {
               let previewText = "Nouvelle conversation";
 
               if (lastMessage) {
-                if (
+                if (lastMessage.isStreaming) {
+                  previewText = "Réponse en cours…";
+                } else if (
                   typeof lastMessage.text === "string" &&
                   lastMessage.text.trim().length > 0
                 ) {
@@ -1048,7 +1181,7 @@ function App() {
               className={`message ${m.sender === "user" ? "user" : "bot"}`}
             >
               <div className="bubble">
-                {renderMessageContent(m.text, i)}
+                {renderMessageContent(m, i)}
                 {m.attachments?.length > 0 && (
                   <ul className="attachment-list">
                     {m.attachments.map((file, idx) => (
