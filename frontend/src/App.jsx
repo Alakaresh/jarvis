@@ -158,6 +158,11 @@ const REALTIME_VOICES = [
   { value: "alloy", label: "Alloy" },
 ];
 
+const WAKE_WORD = "jarvis";
+const WAKE_WORD_PATTERN = /\bjarvis\b/i;
+const HOTWORD_COOLDOWN_MS = 6000;
+const HOTWORD_RESTART_DELAY_MS = 800;
+
 const guessExtensionFromMime = (mimeType) => {
   if (typeof mimeType !== "string") {
     return "webm";
@@ -576,6 +581,9 @@ function App() {
   const [realtimeStatus, setRealtimeStatus] = useState("idle");
   const [realtimeError, setRealtimeError] = useState("");
   const [realtimeVoice, setRealtimeVoice] = useState(REALTIME_VOICES[0].value);
+  const [isWakeWordEnabled, setIsWakeWordEnabled] = useState(false);
+  const [wakeWordError, setWakeWordError] = useState("");
+  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -591,7 +599,47 @@ function App() {
   const peerConnectionRef = useRef(null);
   const realtimeStreamRef = useRef(null);
   const realtimeRemoteAudioRef = useRef(null);
-  const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
+  const hotwordRecognitionRef = useRef(null);
+  const hotwordRestartTimeoutRef = useRef(null);
+  const hotwordActivationTimeoutRef = useRef(null);
+  const hotwordManualStopRef = useRef(false);
+  const hotwordCooldownTimestampRef = useRef(0);
+  const startVoiceRecognitionRef = useRef(null);
+  const isListeningRef = useRef(isListening);
+  const isTranscribingAudioRef = useRef(isTranscribingAudio);
+  const isRealtimeActiveRef = useRef(isRealtimeActive);
+  const isWakeWordEnabledRef = useRef(isWakeWordEnabled);
+
+  const stopHotwordDetection = useCallback((markManualStop = true) => {
+    if (hotwordRestartTimeoutRef.current) {
+      clearTimeout(hotwordRestartTimeoutRef.current);
+      hotwordRestartTimeoutRef.current = null;
+    }
+
+    if (hotwordActivationTimeoutRef.current) {
+      clearTimeout(hotwordActivationTimeoutRef.current);
+      hotwordActivationTimeoutRef.current = null;
+    }
+
+    hotwordManualStopRef.current = markManualStop;
+
+    const recognition = hotwordRecognitionRef.current;
+    if (recognition) {
+      recognition.onresult = null;
+      recognition.onerror = null;
+      recognition.onend = null;
+
+      try {
+        recognition.stop();
+      } catch (error) {
+        if (error?.name !== "InvalidStateError") {
+          console.warn("Impossible d'arrêter la détection du mot clé", error);
+        }
+      }
+    }
+
+    hotwordRecognitionRef.current = null;
+  }, []);
 
   const stopRealtimeSession = useCallback(() => {
     const peerConnection = peerConnectionRef.current;
@@ -636,6 +684,22 @@ function App() {
     setIsRealtimeActive(false);
     setRealtimeStatus("idle");
   }, []);
+
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  useEffect(() => {
+    isTranscribingAudioRef.current = isTranscribingAudio;
+  }, [isTranscribingAudio]);
+
+  useEffect(() => {
+    isRealtimeActiveRef.current = isRealtimeActive;
+  }, [isRealtimeActive]);
+
+  useEffect(() => {
+    isWakeWordEnabledRef.current = isWakeWordEnabled;
+  }, [isWakeWordEnabled]);
 
   const cleanupMediaStream = () => {
     const stream = mediaStreamRef.current;
@@ -795,6 +859,8 @@ function App() {
       return;
     }
 
+    stopHotwordDetection();
+
     if (voiceModeRef.current === VOICE_MODE_BROWSER) {
       const recognition = recognitionRef.current;
 
@@ -896,6 +962,10 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    startVoiceRecognitionRef.current = startVoiceRecognition;
+  }, [startVoiceRecognition]);
+
   const toggleVoiceRecognition = async () => {
     if (!isVoiceSupported || isTranscribingAudio) {
       return;
@@ -919,6 +989,8 @@ function App() {
       setIsRealtimeActive(false);
       return;
     }
+
+    stopHotwordDetection();
 
     if (peerConnectionRef.current) {
       stopRealtimeSession();
@@ -1341,6 +1413,56 @@ function App() {
   const isRealtimeToggleDisabled =
     !isRealtimeActive && (isListening || isTranscribingAudio);
 
+  const wakeWordDisplay =
+    WAKE_WORD.charAt(0).toUpperCase() + WAKE_WORD.slice(1);
+  const speechRecognitionAvailable =
+    typeof window !== "undefined" &&
+    (window.SpeechRecognition || window.webkitSpeechRecognition);
+  const isWakeWordSupported = Boolean(
+    speechRecognitionAvailable && recognitionRef.current
+  );
+  const isWakeWordActive =
+    isWakeWordEnabled &&
+    isWakeWordSupported &&
+    !isListening &&
+    !isTranscribingAudio &&
+    !isRealtimeActive;
+  const isWakeWordToggleDisabled =
+    !hasCheckedVoiceSupport ||
+    !isVoiceSupported ||
+    !isWakeWordSupported ||
+    isRealtimeActive ||
+    isListening ||
+    isTranscribingAudio;
+
+  const handleWakeWordToggle = (event) => {
+    const { checked } = event.target;
+
+    if (!checked) {
+      setIsWakeWordEnabled(false);
+      setWakeWordError("");
+      stopHotwordDetection();
+      return;
+    }
+
+    if (!isWakeWordSupported) {
+      setWakeWordError(
+        "La détection par mot clé nécessite un navigateur compatible (Chrome, Edge…)."
+      );
+      return;
+    }
+
+    if (isRealtimeActive) {
+      setWakeWordError(
+        `Désactive la session vocale temps réel avant d'utiliser le déclencheur "${wakeWordDisplay}".`
+      );
+      return;
+    }
+
+    setWakeWordError("");
+    setIsWakeWordEnabled(true);
+  };
+
   const copyTextToClipboard = async (text) => {
     if (!text) {
       return false;
@@ -1696,6 +1818,190 @@ function App() {
     setIsVoiceSupported(false);
     setHasCheckedVoiceSupport(true);
   }, []);
+
+  useEffect(() => {
+    if (!isWakeWordEnabled) {
+      stopHotwordDetection();
+      return;
+    }
+
+    if (!isWakeWordSupported) {
+      stopHotwordDetection();
+      setWakeWordError(
+        "La détection par mot clé nécessite un navigateur compatible (Chrome, Edge…)."
+      );
+      setIsWakeWordEnabled(false);
+      return;
+    }
+
+    if (isListening || isTranscribingAudio || isRealtimeActive) {
+      stopHotwordDetection();
+      return;
+    }
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      stopHotwordDetection();
+      setWakeWordError(
+        "La détection par mot clé nécessite un navigateur compatible (Chrome, Edge…)."
+      );
+      setIsWakeWordEnabled(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const launchDetection = () => {
+      if (cancelled || hotwordRecognitionRef.current) {
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.lang = "fr-FR";
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 1;
+
+      hotwordManualStopRef.current = false;
+
+      recognition.onresult = (event) => {
+        if (cancelled) {
+          return;
+        }
+
+        for (
+          let index = event.resultIndex;
+          index < event.results.length;
+          index += 1
+        ) {
+          const result = event.results[index];
+          const transcript = result[0]?.transcript ?? "";
+
+          if (!transcript) {
+            continue;
+          }
+
+          if (!WAKE_WORD_PATTERN.test(transcript)) {
+            continue;
+          }
+
+          const now = Date.now();
+          if (now - hotwordCooldownTimestampRef.current < HOTWORD_COOLDOWN_MS) {
+            continue;
+          }
+
+          hotwordCooldownTimestampRef.current = now;
+
+          stopHotwordDetection();
+
+          if (hotwordActivationTimeoutRef.current) {
+            clearTimeout(hotwordActivationTimeoutRef.current);
+          }
+
+          hotwordActivationTimeoutRef.current = window.setTimeout(() => {
+            hotwordActivationTimeoutRef.current = null;
+
+            if (
+              !isWakeWordEnabledRef.current ||
+              isListeningRef.current ||
+              isTranscribingAudioRef.current ||
+              isRealtimeActiveRef.current
+            ) {
+              return;
+            }
+
+            const starter = startVoiceRecognitionRef.current;
+            if (typeof starter === "function") {
+              starter();
+            }
+          }, 120);
+
+          break;
+        }
+      };
+
+      recognition.onerror = (event) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (
+          event.error === "not-allowed" ||
+          event.error === "service-not-allowed"
+        ) {
+          stopHotwordDetection();
+          setWakeWordError(
+            `Autorise le micro pour utiliser le déclencheur "${wakeWordDisplay}".`
+          );
+          setIsWakeWordEnabled(false);
+          return;
+        }
+
+        if (event.error === "no-speech" || event.error === "aborted") {
+          return;
+        }
+
+        console.warn("Erreur de détection du mot clé", event.error);
+      };
+
+      recognition.onend = () => {
+        hotwordRecognitionRef.current = null;
+
+        if (
+          cancelled ||
+          hotwordManualStopRef.current ||
+          !isWakeWordEnabledRef.current
+        ) {
+          return;
+        }
+
+        hotwordRestartTimeoutRef.current = window.setTimeout(() => {
+          if (!cancelled && isWakeWordEnabledRef.current) {
+            launchDetection();
+          }
+        }, HOTWORD_RESTART_DELAY_MS);
+      };
+
+      try {
+        recognition.start();
+        hotwordRecognitionRef.current = recognition;
+        setWakeWordError((previous) => (previous ? "" : previous));
+      } catch (error) {
+        if (
+          error?.name === "NotAllowedError" ||
+          error?.name === "SecurityError"
+        ) {
+          stopHotwordDetection();
+          setWakeWordError(
+            `Autorise le micro pour utiliser le déclencheur "${wakeWordDisplay}".`
+          );
+          setIsWakeWordEnabled(false);
+        } else if (error?.name !== "InvalidStateError") {
+          console.warn("Impossible de démarrer la détection du mot clé", error);
+        }
+      }
+    };
+
+    launchDetection();
+
+    return () => {
+      cancelled = true;
+      stopHotwordDetection();
+    };
+  }, [
+    isWakeWordEnabled,
+    isWakeWordSupported,
+    isListening,
+    isTranscribingAudio,
+    isRealtimeActive,
+    stopHotwordDetection,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -2165,6 +2471,29 @@ function App() {
                   </button>
                 </span>
               ))}
+            </div>
+          )}
+          <div className="wake-word-toggle">
+            <label>
+              <input
+                type="checkbox"
+                checked={isWakeWordEnabled && isWakeWordSupported}
+                onChange={handleWakeWordToggle}
+                disabled={isWakeWordToggleDisabled}
+              />
+              <span>
+                Dire « {wakeWordDisplay} » pour démarrer la dictée
+              </span>
+            </label>
+          </div>
+          {isWakeWordActive && (
+            <div className="voice-support-hint" role="status">
+              🎙️ Dis « {wakeWordDisplay} » pour lancer la dictée automatiquement.
+            </div>
+          )}
+          {wakeWordError && (
+            <div className="voice-support-hint error" role="alert">
+              🎙️ {wakeWordError}
             </div>
           )}
           {isListening && (

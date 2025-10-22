@@ -877,6 +877,42 @@ body {
   padding: 0 16px;
 }
 
+.wake-word-toggle {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+}
+
+.wake-word-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.wake-word-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #60a5fa;
+}
+
+.wake-word-toggle input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  accent-color: #4b5563;
+}
+
+.wake-word-toggle span {
+  opacity: 0.9;
+}
+
+.wake-word-toggle + .voice-support-hint {
+  margin-top: 10px;
+}
+
 .voice-support-hint {
   font-size: 0.85rem;
   color: #dbeafe;
