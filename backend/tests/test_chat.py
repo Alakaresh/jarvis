@@ -3,12 +3,17 @@ from __future__ import annotations
 from collections import deque
 from datetime import datetime as real_datetime, timezone as real_timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from types import SimpleNamespace
+from pathlib import Path
+import sys
 
 import pytest
 from fastapi import HTTPException
 import fastapi.dependencies.utils as fastapi_utils
 
 fastapi_utils.ensure_multipart_is_installed = lambda: None
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import backend.main as main
 from backend.config import Settings
@@ -22,6 +27,19 @@ from backend.services.ai_provider import (
 
 
 pytestmark = pytest.mark.anyio("asyncio")
+
+
+class DummyUpload:
+    def __init__(self, data: bytes, filename: str = "sample.webm") -> None:
+        self._data = data
+        self.filename = filename
+        self.content_type = "audio/webm"
+
+    async def read(self) -> bytes:
+        return self._data
+
+    async def close(self) -> None:
+        return None
 
 
 WEEKDAYS_FR = [
@@ -250,3 +268,104 @@ async def test_chat_includes_recent_history(monkeypatch):
 
     assert len(history) == 5
     assert history[-1] == ("quelle est la météo ?", "réponse")
+
+
+async def test_transcribe_audio_success(monkeypatch):
+    monkeypatch.setattr(main.settings, "openai_api_key", "fake-key", raising=False)
+
+    captured_calls: list[tuple[str, bytes]] = []
+
+    class DummyTranscriptions:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create(self, *, model, file):
+            self.calls.append(model)
+            captured_calls.append((model, file.read()))
+            return SimpleNamespace(text=" Bonjour ")
+
+    transcriptions = DummyTranscriptions()
+
+    class DummyClient:
+        def __init__(self, api_key: str) -> None:
+            assert api_key == "fake-key"
+            self.audio = SimpleNamespace(transcriptions=transcriptions)
+
+    monkeypatch.setattr(main, "OpenAI", DummyClient)
+
+    upload = DummyUpload(b"audio-bytes", filename="sample.webm")
+    response = await main.transcribe_audio(audio=upload)
+
+    assert response == {"text": "Bonjour"}
+    assert captured_calls == [(main._TRANSCRIPTION_MODELS[0], b"audio-bytes")]
+
+
+async def test_transcribe_audio_empty_file(monkeypatch):
+    monkeypatch.setattr(main.settings, "openai_api_key", "fake-key", raising=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.transcribe_audio(audio=DummyUpload(b""))
+
+    assert exc_info.value.status_code == 400
+    assert "vide" in exc_info.value.detail
+
+
+async def test_transcribe_audio_requires_key(monkeypatch):
+    monkeypatch.setattr(main.settings, "openai_api_key", None, raising=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.transcribe_audio(audio=DummyUpload(b"data"))
+
+    assert exc_info.value.status_code == 503
+
+
+async def test_transcribe_audio_fallback_to_second_model(monkeypatch):
+    monkeypatch.setattr(main.settings, "openai_api_key", "fake-key", raising=False)
+
+    call_order: list[str] = []
+
+    class DummyTranscriptions:
+        def create(self, *, model, file):
+            call_order.append(model)
+            if len(call_order) == 1:
+                return SimpleNamespace(text="   ")
+            return SimpleNamespace(text="Salut")
+
+    transcriptions = DummyTranscriptions()
+
+    class DummyClient:
+        def __init__(self, api_key: str) -> None:
+            self.audio = SimpleNamespace(transcriptions=transcriptions)
+
+    monkeypatch.setattr(main, "OpenAI", DummyClient)
+
+    response = await main.transcribe_audio(audio=DummyUpload(b"voice"))
+
+    assert response == {"text": "Salut"}
+    assert call_order == list(main._TRANSCRIPTION_MODELS)
+
+
+async def test_transcribe_audio_failure(monkeypatch):
+    monkeypatch.setattr(main.settings, "openai_api_key", "fake-key", raising=False)
+
+    class DummyTranscriptions:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def create(self, *, model, file):
+            self.calls.append(model)
+            raise RuntimeError("kaput")
+
+    transcriptions = DummyTranscriptions()
+
+    class DummyClient:
+        def __init__(self, api_key: str) -> None:
+            self.audio = SimpleNamespace(transcriptions=transcriptions)
+
+    monkeypatch.setattr(main, "OpenAI", DummyClient)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await main.transcribe_audio(audio=DummyUpload(b"voice"))
+
+    assert exc_info.value.status_code == 502
+    assert transcriptions.calls == list(main._TRANSCRIPTION_MODELS)
