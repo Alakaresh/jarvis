@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import sys
@@ -10,6 +11,7 @@ import sys
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from openai import OpenAI
 
 # Ensure the "backend" package can be imported when the module is executed
 # directly (e.g. via ``uvicorn main:app`` from inside the ``backend`` folder).
@@ -50,6 +52,7 @@ _provider_error: ProviderConfigurationError | None = None
 _memory: VectorMemory | None = None
 _RECENT_HISTORY_LIMIT = 5
 _recent_history: deque[tuple[str, str]] = deque(maxlen=_RECENT_HISTORY_LIMIT)
+_TRANSCRIPTION_MODELS = ("gpt-4o-mini-transcribe", "whisper-1")
 
 _WEEKDAYS_FR = [
     "lundi",
@@ -325,6 +328,68 @@ async def chat(
         print("❌ ERREUR DANS /chat :", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+@app.post("/transcribe-audio")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "La transcription vocale nécessite une clé API OpenAI.",
+        )
+
+    original_filename = audio.filename or "enregistrement.webm"
+
+    try:
+        audio_bytes = await audio.read()
+    except Exception as exc:  # pragma: no cover - unexpected I/O failure
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Impossible de lire le flux audio fourni.",
+        ) from exc
+    finally:
+        await audio.close()
+
+    if not audio_bytes:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Le fichier audio est vide.",
+        )
+
+    client = OpenAI(api_key=settings.openai_api_key)
+
+    last_error: Exception | None = None
+    for model in _TRANSCRIPTION_MODELS:
+        audio_buffer = BytesIO(audio_bytes)
+        audio_buffer.name = original_filename
+
+        try:
+            result = client.audio.transcriptions.create(
+                model=model,
+                file=audio_buffer,
+            )
+        except Exception as exc:  # pragma: no cover - network/API failure
+            last_error = exc
+            continue
+
+        transcript = getattr(result, "text", None)
+        if isinstance(transcript, str):
+            stripped = transcript.strip()
+            if stripped:
+                return {"text": stripped}
+            last_error = RuntimeError("Réponse de transcription vide.")
+            continue
+
+        last_error = RuntimeError("Réponse de transcription invalide.")
+
+    if last_error is not None:  # pragma: no cover - log only
+        print("⚠️ Transcription audio échouée:", last_error)
+
+    raise HTTPException(
+        status.HTTP_502_BAD_GATEWAY,
+        "La transcription vocale a échoué.",
+    )
 
 
 
