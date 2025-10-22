@@ -148,6 +148,174 @@ const HASH_COMMENT_LANGUAGES = new Set([
   "powershell",
 ]);
 
+const DEFAULT_AUDIO_FORMAT = "pcm16";
+const PCM_SAMPLE_RATE = 24000;
+
+const decodeBase64ToUint8Array = (base64) => {
+  if (typeof window === "undefined" || typeof base64 !== "string") {
+    return new Uint8Array(0);
+  }
+
+  try {
+    const binaryString = window.atob(base64);
+    const { length } = binaryString;
+    const bytes = new Uint8Array(length);
+
+    for (let index = 0; index < length; index += 1) {
+      bytes[index] = binaryString.charCodeAt(index);
+    }
+
+    return bytes;
+  } catch (error) {
+    console.warn("Impossible de décoder le flux audio", error);
+    return new Uint8Array(0);
+  }
+};
+
+const decodeBase64ToInt16Array = (base64) => {
+  const bytes = decodeBase64ToUint8Array(base64);
+
+  if (bytes.byteLength === 0) {
+    return new Int16Array(0);
+  }
+
+  const usableLength = bytes.byteLength - (bytes.byteLength % 2);
+
+  if (usableLength <= 0) {
+    return new Int16Array(0);
+  }
+
+  const buffer = bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + usableLength
+  );
+  return new Int16Array(buffer);
+};
+
+const mergePcm16Chunks = (chunks) => {
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return new Int16Array(0);
+  }
+
+  const decodedChunks = chunks
+    .map((chunk) => decodeBase64ToInt16Array(chunk))
+    .filter((chunk) => chunk.length > 0);
+
+  if (decodedChunks.length === 0) {
+    return new Int16Array(0);
+  }
+
+  const totalLength = decodedChunks.reduce(
+    (sum, chunk) => sum + chunk.length,
+    0
+  );
+  const merged = new Int16Array(totalLength);
+  let offset = 0;
+
+  decodedChunks.forEach((chunk) => {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  });
+
+  return merged;
+};
+
+const createWavBlobFromPcm16 = (
+  pcm16Data,
+  sampleRate = PCM_SAMPLE_RATE
+) => {
+  const numChannels = 1;
+  const bytesPerSample = 2;
+  const blockAlign = numChannels * bytesPerSample;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = pcm16Data.length * bytesPerSample;
+
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeString = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+
+  writeString(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, "WAVE");
+  writeString(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bytesPerSample * 8, true);
+  writeString(36, "data");
+  view.setUint32(40, dataSize, true);
+
+  const pcmView = new Int16Array(buffer, 44);
+  pcmView.set(pcm16Data);
+
+  return new Blob([buffer], { type: "audio/wav" });
+};
+
+const createAudioUrlFromChunks = (
+  chunks,
+  format = DEFAULT_AUDIO_FORMAT,
+  sampleRate = PCM_SAMPLE_RATE
+) => {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    return null;
+  }
+
+  const normalizedFormat =
+    typeof format === "string"
+      ? format.trim().toLowerCase() || DEFAULT_AUDIO_FORMAT
+      : DEFAULT_AUDIO_FORMAT;
+
+  if (normalizedFormat === "pcm16") {
+    const merged = mergePcm16Chunks(chunks);
+
+    if (merged.length === 0) {
+      return null;
+    }
+
+    const wavBlob = createWavBlobFromPcm16(merged, sampleRate);
+    return URL.createObjectURL(wavBlob);
+  }
+
+  const byteChunks = chunks
+    .map((chunk) => decodeBase64ToUint8Array(chunk))
+    .filter((chunk) => chunk.byteLength > 0);
+
+  if (byteChunks.length === 0) {
+    return null;
+  }
+
+  const totalLength = byteChunks.reduce(
+    (sum, chunk) => sum + chunk.byteLength,
+    0
+  );
+  const combined = new Uint8Array(totalLength);
+  let offset = 0;
+
+  byteChunks.forEach((chunk) => {
+    combined.set(chunk, offset);
+    offset += chunk.byteLength;
+  });
+
+  const mimeType =
+    normalizedFormat === "mp3"
+      ? "audio/mpeg"
+      : `audio/${normalizedFormat}`;
+
+  return URL.createObjectURL(new Blob([combined.buffer], { type: mimeType }));
+};
+
 const normaliseLanguage = (language) => {
   if (!language) return undefined;
   const trimmed = language.trim().toLowerCase();
@@ -513,11 +681,17 @@ function App() {
   const [selectedFiles, setSelectedFiles] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [copiedCodeKey, setCopiedCodeKey] = useState(null);
+  const [isVoiceReady, setIsVoiceReady] = useState(false);
+  const [isVoiceActivating, setIsVoiceActivating] = useState(false);
   const conversationCounterRef = useRef(1);
   const chatRef = useRef(null);
   const fileInputRef = useRef(null);
   const dragCounter = useRef(0);
   const copyTimeoutRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const audioPlaybackTimeRef = useRef(0);
+  const audioObjectUrlsRef = useRef(new Set());
+  const voiceActivationPromiseRef = useRef(null);
 
   const clearCopyFeedback = () => {
     if (copyTimeoutRef.current) {
@@ -532,6 +706,146 @@ function App() {
     setSelectedFiles([]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
+    }
+  };
+
+  const ensureAudioContext = async () => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    if (!audioContextRef.current) {
+      const AudioContextClass =
+        window.AudioContext || window.webkitAudioContext;
+
+      if (!AudioContextClass) {
+        console.warn("AudioContext non disponible dans ce navigateur");
+        return null;
+      }
+
+      try {
+        audioContextRef.current = new AudioContextClass();
+      } catch (error) {
+        console.warn("Impossible d'initialiser l'AudioContext", error);
+        return null;
+      }
+    }
+
+    const context = audioContextRef.current;
+
+    if (context && context.state === "suspended") {
+      try {
+        await context.resume();
+      } catch (error) {
+        console.warn("Impossible de reprendre l'AudioContext", error);
+      }
+    }
+
+    return audioContextRef.current;
+  };
+
+  const handleActivateVoice = async () => {
+    if (voiceActivationPromiseRef.current) {
+      return voiceActivationPromiseRef.current;
+    }
+
+    const activationPromise = (async () => {
+      setIsVoiceActivating(true);
+
+      try {
+        const context = await ensureAudioContext();
+
+        if (!context || context.state === "closed") {
+          setIsVoiceReady(false);
+          return null;
+        }
+
+        if (context.state === "suspended") {
+          try {
+            await context.resume();
+          } catch (error) {
+            console.warn("Impossible de reprendre l'AudioContext", error);
+            setIsVoiceReady(false);
+            return null;
+          }
+        }
+
+        const currentTime =
+          typeof context.currentTime === "number" ? context.currentTime : 0;
+        const previousPlayback =
+          typeof audioPlaybackTimeRef.current === "number"
+            ? audioPlaybackTimeRef.current
+            : 0;
+
+        audioPlaybackTimeRef.current = Math.max(previousPlayback, currentTime);
+        setIsVoiceReady(true);
+        return context;
+      } catch (error) {
+        console.warn("Impossible d'activer la lecture audio", error);
+        setIsVoiceReady(false);
+        return null;
+      } finally {
+        setIsVoiceActivating(false);
+        voiceActivationPromiseRef.current = null;
+      }
+    })();
+
+    voiceActivationPromiseRef.current = activationPromise;
+    return activationPromise;
+  };
+
+  const playPcmChunk = async (
+    base64Chunk,
+    sampleRate = PCM_SAMPLE_RATE
+  ) => {
+    if (!base64Chunk) {
+      return;
+    }
+
+    let context = audioContextRef.current;
+
+    if (!context) {
+      context = await ensureAudioContext();
+    }
+
+    if (!context) {
+      return;
+    }
+
+    const pcmData = decodeBase64ToInt16Array(base64Chunk);
+
+    if (pcmData.length === 0) {
+      return;
+    }
+
+    const float32 = new Float32Array(pcmData.length);
+
+    for (let index = 0; index < pcmData.length; index += 1) {
+      float32[index] = Math.max(-1, pcmData[index] / 32768);
+    }
+
+    try {
+      const buffer = context.createBuffer(
+        1,
+        float32.length,
+        sampleRate || PCM_SAMPLE_RATE
+      );
+      buffer.copyToChannel(float32, 0);
+
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+
+      const currentPlaybackTime =
+        typeof audioPlaybackTimeRef.current === "number"
+          ? audioPlaybackTimeRef.current
+          : 0;
+      const startAt = Math.max(currentPlaybackTime, context.currentTime);
+
+      source.start(startAt);
+      audioPlaybackTimeRef.current = startAt + buffer.duration;
+    } catch (error) {
+      console.warn("Impossible de jouer un morceau audio", error);
     }
   };
 
@@ -739,6 +1053,11 @@ function App() {
     const rawText =
       typeof message?.text === "string" ? message.text : "";
     const isStreaming = Boolean(message?.isStreaming);
+    const audioUrl =
+      typeof message?.audioUrl === "string" && message.audioUrl.length > 0
+        ? message.audioUrl
+        : null;
+    const hasAudio = Boolean(audioUrl);
 
     const hasRawText = rawText.length > 0;
 
@@ -787,12 +1106,24 @@ function App() {
 
     const hasVisibleSegments = visibleSegments.length > 0;
 
-    if (!hasVisibleSegments && !isStreaming) {
+    if (!hasVisibleSegments && !hasAudio && !isStreaming) {
       return null;
     }
 
     return (
       <div className="message-content">
+        {hasAudio ? (
+          <div className="audio-player-wrapper">
+            <audio
+              className="message-audio-player"
+              controls
+              src={audioUrl}
+              preload="auto"
+            >
+              Votre navigateur ne supporte pas la lecture audio.
+            </audio>
+          </div>
+        ) : null}
         {hasVisibleSegments &&
           visibleSegments.map((segment, index) => {
             if (segment.type === "code") {
@@ -875,6 +1206,26 @@ function App() {
   useEffect(() => {
     return () => {
       clearCopyFeedback();
+      if (typeof window !== "undefined") {
+        audioObjectUrlsRef.current.forEach((url) => {
+          try {
+            URL.revokeObjectURL(url);
+          } catch (error) {
+            console.warn("Impossible de libérer l'URL audio", error);
+          }
+        });
+      }
+      audioObjectUrlsRef.current.clear();
+
+      if (audioContextRef.current) {
+        try {
+          audioContextRef.current.close();
+        } catch (error) {
+          console.warn("Impossible de fermer l'AudioContext", error);
+        }
+        audioContextRef.current = null;
+      }
+      voiceActivationPromiseRef.current = null;
     };
   }, []);
 
@@ -934,8 +1285,34 @@ function App() {
         sender: "bot",
         text: "",
         isStreaming: true,
+        audioUrl: null,
+        audioFormat: null,
+        audioSampleRate: null,
       };
       appendMessageToConversation(conversationIdForRequest, placeholderBotMessage);
+
+      let audioContext = null;
+
+      if (!isVoiceReady) {
+        audioContext = await handleActivateVoice();
+      }
+
+      if (!audioContext) {
+        audioContext = await ensureAudioContext();
+      }
+      if (audioContext) {
+        const previousPlayback =
+          typeof audioPlaybackTimeRef.current === "number"
+            ? audioPlaybackTimeRef.current
+            : 0;
+        audioPlaybackTimeRef.current = Math.max(
+          previousPlayback,
+          audioContext.currentTime
+        );
+        if (audioContext.state !== "closed") {
+          setIsVoiceReady(true);
+        }
+      }
 
       const formData = new FormData();
       formData.append("text", messageText);
@@ -953,21 +1330,118 @@ function App() {
         throw new Error(`Erreur serveur (${res.status})`);
       }
 
-      const contentType = res.headers.get("content-type") || "";
+      const contentType = (res.headers.get("content-type") || "").toLowerCase();
+      const isNdjsonResponse = contentType.includes("application/x-ndjson");
       const isTextResponse = contentType.includes("text/");
       const isJsonResponse = contentType.includes("application/json");
       const textDecoder = new TextDecoder();
       let aggregatedResponse = "";
+      const audioChunks = [];
+      let audioFormat = null;
+      let audioSampleRate = null;
 
-      if (res.body && isTextResponse) {
+      const processNdjsonLine = async (line) => {
+        if (!line) {
+          return;
+        }
+
+        let payload;
+
+        try {
+          payload = JSON.parse(line);
+        } catch (parseError) {
+          console.warn("Chunk de flux invalide", parseError);
+          return;
+        }
+
+        const payloadType =
+          typeof payload?.type === "string" ? payload.type : "";
+
+        if (payloadType === "text-delta" && typeof payload.text === "string") {
+          if (payload.text.length > 0) {
+            aggregatedResponse += payload.text;
+            updateLastMessageInConversation(
+              conversationIdForRequest,
+              (current) => ({
+                text: `${current.text || ""}${payload.text}`,
+              })
+            );
+          }
+          return;
+        }
+
+        if (payloadType === "audio-delta" && typeof payload.audio === "string") {
+          audioChunks.push(payload.audio);
+
+          if (typeof payload.audio_format === "string") {
+            audioFormat = payload.audio_format;
+          }
+
+          if (typeof payload.audio_sample_rate === "number") {
+            audioSampleRate = payload.audio_sample_rate;
+          }
+
+          updateLastMessageInConversation(
+            conversationIdForRequest,
+            (current) => {
+              const updates = {};
+              let hasUpdate = false;
+
+              if (
+                !current.audioFormat &&
+                typeof payload.audio_format === "string"
+              ) {
+                updates.audioFormat = payload.audio_format;
+                hasUpdate = true;
+              }
+
+              if (
+                !current.audioSampleRate &&
+                typeof payload.audio_sample_rate === "number"
+              ) {
+                updates.audioSampleRate = payload.audio_sample_rate;
+                hasUpdate = true;
+              }
+
+              return hasUpdate ? updates : null;
+            }
+          );
+
+          const resolvedFormat =
+            (audioFormat || DEFAULT_AUDIO_FORMAT).toLowerCase();
+          if (resolvedFormat === "pcm16") {
+            await playPcmChunk(
+              payload.audio,
+              audioSampleRate || PCM_SAMPLE_RATE
+            );
+          }
+        }
+      };
+
+      if (res.body && (isTextResponse || isNdjsonResponse)) {
         const reader = res.body.getReader();
+        let bufferedText = "";
 
         while (true) {
           const { value, done } = await reader.read();
 
           if (value) {
             const chunkValue = textDecoder.decode(value, { stream: !done });
-            if (chunkValue) {
+
+            if (isNdjsonResponse) {
+              bufferedText += chunkValue;
+              let newlineIndex;
+
+              while ((newlineIndex = bufferedText.indexOf("\n")) !== -1) {
+                const rawLine = bufferedText.slice(0, newlineIndex);
+                bufferedText = bufferedText.slice(newlineIndex + 1);
+                const trimmedLine = rawLine.trim();
+
+                if (trimmedLine) {
+                  await processNdjsonLine(trimmedLine);
+                }
+              }
+            } else if (chunkValue) {
               aggregatedResponse += chunkValue;
               updateLastMessageInConversation(
                 conversationIdForRequest,
@@ -983,12 +1457,22 @@ function App() {
           }
         }
 
-        const tail = textDecoder.decode();
-        if (tail) {
-          aggregatedResponse += tail;
-          updateLastMessageInConversation(conversationIdForRequest, (current) => ({
-            text: `${current.text || ""}${tail}`,
-          }));
+        if (isNdjsonResponse) {
+          const finalRemainder = (bufferedText + textDecoder.decode()).trim();
+          if (finalRemainder) {
+            await processNdjsonLine(finalRemainder);
+          }
+        } else {
+          const tail = textDecoder.decode();
+          if (tail) {
+            aggregatedResponse += tail;
+            updateLastMessageInConversation(
+              conversationIdForRequest,
+              (current) => ({
+                text: `${current.text || ""}${tail}`,
+              })
+            );
+          }
         }
       } else if (isJsonResponse) {
         const data = await res.json();
@@ -1000,21 +1484,90 @@ function App() {
         aggregatedResponse = await res.text();
       }
 
+      const normalizedAudioFormat = (
+        audioFormat || DEFAULT_AUDIO_FORMAT
+      ).toLowerCase();
+
       const finalResponseText =
         aggregatedResponse && aggregatedResponse.trim().length > 0
           ? aggregatedResponse
+          : audioChunks.length > 0
+          ? "(Réponse vocale)"
           : "(Réponse vide)";
 
-      updateLastMessageInConversation(conversationIdForRequest, () => ({
-        text: finalResponseText,
-        isStreaming: false,
-      }));
+      let finalAudioUrl = null;
+
+      if (audioChunks.length > 0) {
+        finalAudioUrl = createAudioUrlFromChunks(
+          audioChunks,
+          normalizedAudioFormat,
+          audioSampleRate || PCM_SAMPLE_RATE
+        );
+      }
+
+      let urlToRevoke = null;
+
+      updateLastMessageInConversation(
+        conversationIdForRequest,
+        (current) => {
+          if (current.audioUrl && current.audioUrl !== finalAudioUrl) {
+            urlToRevoke = current.audioUrl;
+          }
+
+          return {
+            text: finalResponseText,
+            isStreaming: false,
+            audioUrl: finalAudioUrl || null,
+            audioFormat:
+              audioChunks.length > 0 ? normalizedAudioFormat : null,
+            audioSampleRate:
+              audioChunks.length > 0
+                ? audioSampleRate || PCM_SAMPLE_RATE
+                : null,
+          };
+        }
+      );
+
+      if (urlToRevoke && typeof window !== "undefined") {
+        try {
+          URL.revokeObjectURL(urlToRevoke);
+        } catch (cleanupError) {
+          console.warn("Impossible de libérer l'URL audio", cleanupError);
+        }
+        audioObjectUrlsRef.current.delete(urlToRevoke);
+      }
+
+      if (finalAudioUrl) {
+        audioObjectUrlsRef.current.add(finalAudioUrl);
+      }
     } catch (error) {
       console.error("Erreur lors de l'envoi du message", error);
-      updateLastMessageInConversation(conversationIdForRequest, () => ({
-        text: "⚠️ Erreur : impossible de contacter le serveur.",
-        isStreaming: false,
-      }));
+      let erroredUrl = null;
+      updateLastMessageInConversation(
+        conversationIdForRequest,
+        (current) => {
+          if (current.audioUrl) {
+            erroredUrl = current.audioUrl;
+          }
+
+          return {
+            text: "⚠️ Erreur : impossible de contacter le serveur.",
+            isStreaming: false,
+            audioUrl: null,
+            audioFormat: null,
+            audioSampleRate: null,
+          };
+        }
+      );
+
+      if (erroredUrl && typeof window !== "undefined") {
+        try {
+          URL.revokeObjectURL(erroredUrl);
+        } catch (cleanupError) {
+          console.warn("Impossible de libérer l'URL audio", cleanupError);
+        }
+        audioObjectUrlsRef.current.delete(erroredUrl);
+      }
     } finally {
       setLoadingConversationIds((previousIds) =>
         previousIds.filter((id) => id !== conversationIdForRequest)
@@ -1218,6 +1771,26 @@ function App() {
                 onChange={handleFileChange}
               />
             </label>
+            <button
+              type="button"
+              className={`voice-toggle-button${
+                isVoiceReady ? " ready" : ""
+              }${isVoiceActivating ? " activating" : ""}`}
+              onClick={handleActivateVoice}
+              aria-pressed={isVoiceReady}
+              aria-label={
+                isVoiceReady
+                  ? "Lecture audio activée"
+                  : "Activer la lecture audio"
+              }
+              disabled={isVoiceActivating}
+            >
+              {isVoiceActivating
+                ? "⏳ Activation..."
+                : isVoiceReady
+                ? "🔊 Audio prêt"
+                : "▶️ Activer la voix"}
+            </button>
             <input
               type="text"
               value={input}

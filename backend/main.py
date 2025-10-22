@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -30,6 +31,7 @@ from backend.services.ai_provider import (
     Attachment,
     ProviderConfigurationError,
     ProviderRequestError,
+    StreamEvent,
     create_provider,
 )
 
@@ -262,12 +264,17 @@ async def chat(
 
             async def streaming_generator():
                 loop = asyncio.get_running_loop()
-                queue: asyncio.Queue[tuple[str | None, Exception | None]] = asyncio.Queue()
+                queue: asyncio.Queue[tuple[StreamEvent | None, Exception | None]] = (
+                    asyncio.Queue()
+                )
 
                 def produce() -> None:
                     try:
                         for chunk in _provider.stream_response(prompt, attachments):
-                            asyncio.run_coroutine_threadsafe(queue.put((chunk, None)), loop)
+                            asyncio.run_coroutine_threadsafe(
+                                queue.put((chunk, None)),
+                                loop,
+                            )
                     except Exception as exc:
                         asyncio.run_coroutine_threadsafe(queue.put((None, exc)), loop)
                     finally:
@@ -289,9 +296,11 @@ async def chat(
                             ) from error
                         if chunk is None:
                             break
-                        if chunk:
-                            final_parts.append(chunk)
-                            yield chunk
+                        if chunk.type == "text-delta" and chunk.text:
+                            final_parts.append(chunk.text)
+
+                        payload = chunk.to_payload()
+                        yield json.dumps(payload, ensure_ascii=False) + "\n"
                 except asyncio.CancelledError:
                     cancelled = True
                 finally:
@@ -304,7 +313,8 @@ async def chat(
                 handle_response(response_text)
 
             return StreamingResponse(
-                streaming_generator(), media_type="text/plain; charset=utf-8"
+                streaming_generator(),
+                media_type="application/x-ndjson; charset=utf-8",
             )
 
         try:
