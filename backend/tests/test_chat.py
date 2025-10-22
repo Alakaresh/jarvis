@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime as real_datetime, timezone as real_timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -118,16 +119,16 @@ async def test_chat_endpoint_success(monkeypatch):
 
     assert response == {"response": "réponse"}
 
-    expected_now = FixedDatetime.now(real_timezone.utc)
+    expected_now = FixedDatetime.now(real_timezone.utc).astimezone(ZoneInfo("Europe/Paris"))
     weekday = WEEKDAYS_FR[expected_now.weekday()]
     month = MONTHS_FR[expected_now.month - 1]
     date_description = f"{weekday} {expected_now.day} {month} {expected_now.year}"
     time_description = expected_now.strftime("%H:%M")
-    iso_timestamp = expected_now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    iso_timestamp = expected_now.isoformat(timespec="minutes")
     expected_context = (
         "Informations temporelles actuelles :\n"
         f"- Nous sommes {date_description}.\n"
-        f"- Il est {time_description} (UTC).\n"
+        f"- Il est {time_description} (heure de Paris).\n"
         f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
         "Prends en compte cette temporalité lorsque c'est pertinent."
     )

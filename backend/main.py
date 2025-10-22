@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 import sys
 
@@ -77,19 +78,20 @@ _MONTHS_FR = [
 
 
 def _build_temporal_context() -> str:
-    """Return a human readable description of the current UTC date and time."""
+    """Return a human readable description of the current Paris date and time."""
 
     now_utc = datetime.now(timezone.utc)
-    weekday = _WEEKDAYS_FR[now_utc.weekday()]
-    month = _MONTHS_FR[now_utc.month - 1]
-    date_description = f"{weekday} {now_utc.day} {month} {now_utc.year}"
-    time_description = now_utc.strftime("%H:%M")
-    iso_timestamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_paris = now_utc.astimezone(ZoneInfo("Europe/Paris"))
+    weekday = _WEEKDAYS_FR[now_paris.weekday()]
+    month = _MONTHS_FR[now_paris.month - 1]
+    date_description = f"{weekday} {now_paris.day} {month} {now_paris.year}"
+    time_description = now_paris.strftime("%H:%M")
+    iso_timestamp = now_paris.isoformat(timespec="minutes")
 
     return (
         "Informations temporelles actuelles :\n"
         f"- Nous sommes {date_description}.\n"
-        f"- Il est {time_description} (UTC).\n"
+        f"- Il est {time_description} (heure de Paris).\n"
         f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
         "Prends en compte cette temporalité lorsque c'est pertinent."
     )
