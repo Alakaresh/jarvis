@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime as real_datetime, timezone as real_timezone
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 from fastapi import HTTPException
@@ -119,7 +119,13 @@ async def test_chat_endpoint_success(monkeypatch):
 
     assert response == {"response": "réponse"}
 
-    expected_now = FixedDatetime.now(real_timezone.utc).astimezone(ZoneInfo("Europe/Paris"))
+    base_utc = FixedDatetime.now(real_timezone.utc)
+    try:
+        expected_now = base_utc.astimezone(ZoneInfo("Europe/Paris"))
+        expected_label = main._PARIS_LABEL
+    except ZoneInfoNotFoundError:
+        expected_now = base_utc.astimezone(main._PARIS_FALLBACK_TZ)
+        expected_label = main._PARIS_FALLBACK_LABEL
     weekday = WEEKDAYS_FR[expected_now.weekday()]
     month = MONTHS_FR[expected_now.month - 1]
     date_description = f"{weekday} {expected_now.day} {month} {expected_now.year}"
@@ -128,7 +134,7 @@ async def test_chat_endpoint_success(monkeypatch):
     expected_context = (
         "Informations temporelles actuelles :\n"
         f"- Nous sommes {date_description}.\n"
-        f"- Il est {time_description} (heure de Paris).\n"
+        f"- Il est {time_description} ({expected_label}).\n"
         f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
         "Prends en compte cette temporalité lorsque c'est pertinent."
     )
@@ -136,6 +142,53 @@ async def test_chat_endpoint_success(monkeypatch):
     prompt = prompts[0]
     assert prompt.startswith(expected_context)
     assert prompt.endswith("Nouvelle demande :\nhello")
+
+
+async def test_chat_endpoint_timezone_fallback(monkeypatch):
+    prompts: list[str] = []
+
+    class RecordingProvider:
+        def generate_response(self, prompt: str, attachments=None) -> str:  # type: ignore[override]
+            prompts.append(prompt)
+            return "réponse"
+
+    class FixedDatetime:
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            base = real_datetime(2024, 6, 5, 14, 30, tzinfo=real_timezone.utc)
+            if tz is not None:
+                return base.astimezone(tz)
+            return base
+
+    def raising_zoneinfo(key: str):
+        raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(main, "datetime", FixedDatetime)
+    monkeypatch.setattr(main, "ZoneInfo", raising_zoneinfo)
+    monkeypatch.setattr(main, "_provider", RecordingProvider())
+    monkeypatch.setattr(main, "_provider_error", None)
+    monkeypatch.setattr(main, "_recent_history", deque(maxlen=5))
+
+    response = await main.chat(text="hello", files=None, stream=False)
+
+    assert response == {"response": "réponse"}
+
+    expected_now = FixedDatetime.now(real_timezone.utc).astimezone(main._PARIS_FALLBACK_TZ)
+    weekday = WEEKDAYS_FR[expected_now.weekday()]
+    month = MONTHS_FR[expected_now.month - 1]
+    date_description = f"{weekday} {expected_now.day} {month} {expected_now.year}"
+    time_description = expected_now.strftime("%H:%M")
+    iso_timestamp = expected_now.isoformat(timespec="minutes")
+    expected_context = (
+        "Informations temporelles actuelles :\n"
+        f"- Nous sommes {date_description}.\n"
+        f"- Il est {time_description} ({main._PARIS_FALLBACK_LABEL}).\n"
+        f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
+        "Prends en compte cette temporalité lorsque c'est pertinent."
+    )
+    assert prompts, "Le provider aurait dû être appelé"
+    prompt = prompts[0]
+    assert prompt.startswith(expected_context)
 
 
 async def test_chat_endpoint_provider_error(monkeypatch):

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 import sys
 
@@ -77,11 +77,25 @@ _MONTHS_FR = [
 ]
 
 
+_PARIS_FALLBACK_TZ = timezone(timedelta(hours=2))
+_PARIS_LABEL = "heure de Paris"
+_PARIS_FALLBACK_LABEL = "heure de Paris (UTC+02:00 approximative)"
+
+
 def _build_temporal_context() -> str:
     """Return a human readable description of the current Paris date and time."""
 
     now_utc = datetime.now(timezone.utc)
-    now_paris = now_utc.astimezone(ZoneInfo("Europe/Paris"))
+
+    try:
+        paris_tz = ZoneInfo("Europe/Paris")
+    except ZoneInfoNotFoundError:
+        now_paris = now_utc.astimezone(_PARIS_FALLBACK_TZ)
+        time_label = _PARIS_FALLBACK_LABEL
+    else:
+        now_paris = now_utc.astimezone(paris_tz)
+        time_label = _PARIS_LABEL
+
     weekday = _WEEKDAYS_FR[now_paris.weekday()]
     month = _MONTHS_FR[now_paris.month - 1]
     date_description = f"{weekday} {now_paris.day} {month} {now_paris.year}"
@@ -91,7 +105,7 @@ def _build_temporal_context() -> str:
     return (
         "Informations temporelles actuelles :\n"
         f"- Nous sommes {date_description}.\n"
-        f"- Il est {time_description} (heure de Paris).\n"
+        f"- Il est {time_description} ({time_label}).\n"
         f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
         "Prends en compte cette temporalité lorsque c'est pertinent."
     )
