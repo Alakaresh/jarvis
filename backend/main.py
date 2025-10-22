@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -48,6 +49,50 @@ _provider_error: ProviderConfigurationError | None = None
 _memory: VectorMemory | None = None
 _RECENT_HISTORY_LIMIT = 5
 _recent_history: deque[tuple[str, str]] = deque(maxlen=_RECENT_HISTORY_LIMIT)
+
+_WEEKDAYS_FR = [
+    "lundi",
+    "mardi",
+    "mercredi",
+    "jeudi",
+    "vendredi",
+    "samedi",
+    "dimanche",
+]
+
+_MONTHS_FR = [
+    "janvier",
+    "février",
+    "mars",
+    "avril",
+    "mai",
+    "juin",
+    "juillet",
+    "août",
+    "septembre",
+    "octobre",
+    "novembre",
+    "décembre",
+]
+
+
+def _build_temporal_context() -> str:
+    """Return a human readable description of the current UTC date and time."""
+
+    now_utc = datetime.now(timezone.utc)
+    weekday = _WEEKDAYS_FR[now_utc.weekday()]
+    month = _MONTHS_FR[now_utc.month - 1]
+    date_description = f"{weekday} {now_utc.day} {month} {now_utc.year}"
+    time_description = now_utc.strftime("%H:%M")
+    iso_timestamp = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return (
+        "Informations temporelles actuelles :\n"
+        f"- Nous sommes {date_description}.\n"
+        f"- Il est {time_description} (UTC).\n"
+        f"- Timestamp ISO 8601 : {iso_timestamp}.\n"
+        "Prends en compte cette temporalité lorsque c'est pertinent."
+    )
 
 
 def _initialise_provider() -> None:
@@ -141,7 +186,7 @@ async def chat(
             except Exception as exc:  # pragma: no cover - log only
                 print("⚠️ Impossible de récupérer la mémoire vectorielle:", exc)
 
-        prompt_sections: list[str] = []
+        prompt_sections: list[str] = [_build_temporal_context()]
 
         if _recent_history:
             history_entries = []
