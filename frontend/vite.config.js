@@ -19,8 +19,8 @@ const registerOptionalAlias = (moduleId, localPath) => {
 };
 
 registerOptionalAlias(
-  "@picovoice/porcupine-web-en-worker",
-  resolveLocalPath("./src/shims/picovoice-porcupine-web-en-worker.js"),
+  "@picovoice/porcupine-web",
+  resolveLocalPath("./src/shims/picovoice-porcupine-web.js"),
 );
 
 registerOptionalAlias(
