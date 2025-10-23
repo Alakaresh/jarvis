@@ -1407,6 +1407,34 @@ function App() {
 
         const keywordBuffer = await keywordResponse.arrayBuffer();
 
+        let isPlaceholderKeyword = false;
+
+        try {
+          const placeholderSampleLength = Math.min(256, keywordBuffer.byteLength);
+          if (placeholderSampleLength > 0) {
+            const placeholderSample = new Uint8Array(
+              keywordBuffer,
+              0,
+              placeholderSampleLength
+            );
+            const decodedSample = new TextDecoder("utf-8", {
+              fatal: false,
+            }).decode(placeholderSample);
+            if (decodedSample.includes("This is a placeholder file")) {
+              isPlaceholderKeyword = true;
+            }
+          }
+        } catch (placeholderCheckError) {
+          console.warn(
+            "Impossible de vérifier le contenu du mot-clé Porcupine",
+            placeholderCheckError
+          );
+        }
+
+        if (isPlaceholderKeyword) {
+          throw new Error("keyword-placeholder");
+        }
+
         if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
           return;
         }
@@ -1736,6 +1764,10 @@ function App() {
         if (error?.message === "keyword-not-found") {
           setVoiceError(
             "Mot-clé Porcupine introuvable. Place le fichier .ppn dans frontend/public/keywords/."
+          );
+        } else if (error?.message === "keyword-placeholder") {
+          setVoiceError(
+            "Le fichier de mot-clé Porcupine est un exemple. Remplace-le par ton propre .ppn téléchargé depuis Picovoice."
           );
         } else if (error?.message === "porcupine-factory-missing") {
           setVoiceError(
