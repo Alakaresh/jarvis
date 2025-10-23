@@ -1316,10 +1316,20 @@ function App() {
     const setupToken = wakeWordSetupTokenRef.current;
     const setupPromise = (async () => {
       try {
-        const [{ PorcupineWorkerFactory }, keywordResponse] = await Promise.all([
+        const [porcupineModule, keywordResponse] = await Promise.all([
           import("@picovoice/porcupine-web"),
           fetch(PICOVOICE_KEYWORD_PATH),
         ]);
+
+        const PorcupineWorkerFactory =
+          porcupineModule?.PorcupineWorkerFactory ??
+          porcupineModule?.default?.PorcupineWorkerFactory ??
+          porcupineModule?.default ??
+          null;
+
+        if (!PorcupineWorkerFactory?.create) {
+          throw new Error("porcupine-factory-missing");
+        }
 
         if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
           return;
@@ -1510,6 +1520,10 @@ function App() {
         if (error?.message === "keyword-not-found") {
           setVoiceError(
             "Mot-clé Porcupine introuvable. Place le fichier .ppn dans frontend/public/keywords/."
+          );
+        } else if (error?.message === "porcupine-factory-missing") {
+          setVoiceError(
+            "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web."
           );
         } else if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
           setVoiceError(
