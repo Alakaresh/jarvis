@@ -159,6 +159,7 @@ const REALTIME_VOICES = [
 ];
 
 const PICOVOICE_WAKE_WORD_LABEL = "Jarvis";
+const PICOVOICE_WAKE_WORD_SENSITIVITY = 0.6;
 const PICOVOICE_KEYWORD_PATH = "/keywords/jarvis.ppn";
 const PICOVOICE_SAMPLE_RATE = 16000;
 const PORCUPINE_FRAME_LENGTH = 512;
@@ -363,6 +364,292 @@ const resolvePorcupineExports = (module) => {
     jarvisKeyword: getJarvisKeywordFromEnum(keywordEnum),
     keywordEnum: keywordEnum ?? null,
   };
+};
+
+const clampNumber = (value, min, max, fallback) => {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return fallback;
+    }
+    return Math.min(Math.max(value, min), max);
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value.trim());
+    if (Number.isFinite(parsed)) {
+      return Math.min(Math.max(parsed, min), max);
+    }
+  }
+
+  return fallback;
+};
+
+const normalisePorcupineSensitivity = (value) =>
+  clampNumber(value, 0, 1, PICOVOICE_WAKE_WORD_SENSITIVITY);
+
+const addKeywordVariant = (variants, seen, candidate) => {
+  if (!Array.isArray(candidate) || candidate.length === 0) {
+    return;
+  }
+
+  const serialised = JSON.stringify(candidate, (key, entryValue) => {
+    if (
+      key === "base64" &&
+      typeof entryValue === "string" &&
+      entryValue.length > 16
+    ) {
+      return `${entryValue.length}:${entryValue.slice(0, 8)}`;
+    }
+
+    return entryValue;
+  });
+
+  if (seen.has(serialised)) {
+    return;
+  }
+
+  seen.add(serialised);
+  variants.push(candidate);
+};
+
+const extractBuiltinKeywordValue = (keyword) => {
+  if (!keyword) {
+    return "";
+  }
+
+  if (typeof keyword === "string") {
+    return keyword.trim();
+  }
+
+  if (typeof keyword === "object") {
+    const candidates = [
+      keyword.builtinKeyword,
+      keyword.builtin,
+      keyword.keyword,
+      keyword.value,
+      keyword.name,
+      keyword.id,
+    ];
+
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate.trim();
+      }
+    }
+
+    if (typeof keyword.toString === "function") {
+      const text = `${keyword}`;
+      if (text && text !== "[object Object]") {
+        const trimmed = text.trim();
+        if (trimmed) {
+          return trimmed;
+        }
+      }
+    }
+  }
+
+  return "";
+};
+
+const extractKeywordLabel = (keyword, fallbackLabel) => {
+  if (keyword && typeof keyword === "object") {
+    const candidateLabel =
+      (typeof keyword.label === "string" && keyword.label.trim()) ||
+      (typeof keyword.name === "string" && keyword.name.trim());
+
+    if (candidateLabel) {
+      return candidateLabel;
+    }
+  }
+
+  if (typeof keyword === "string" && keyword.trim()) {
+    const trimmed = keyword.trim();
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+
+  return fallbackLabel;
+};
+
+const buildCustomKeywordCandidates = (definition, fallbackLabel) => {
+  if (!definition) {
+    return [];
+  }
+
+  const base64 =
+    typeof definition.base64 === "string" ? definition.base64.trim() : "";
+  const customBase64 =
+    typeof definition?.custom?.base64 === "string"
+      ? definition.custom.base64.trim()
+      : "";
+
+  if (!base64 && !customBase64) {
+    return [];
+  }
+
+  const label =
+    typeof definition.label === "string" && definition.label.trim()
+      ? definition.label.trim()
+      : fallbackLabel;
+
+  const sensitivity = normalisePorcupineSensitivity(definition.sensitivity);
+
+  const variants = [];
+  const seen = new Set();
+
+  addKeywordVariant(variants, seen, [definition]);
+
+  if (base64) {
+    addKeywordVariant(variants, seen, [
+      {
+        label,
+        base64,
+        sensitivity,
+      },
+    ]);
+  }
+
+  const effectiveCustomBase64 = customBase64 || base64;
+
+  if (effectiveCustomBase64) {
+    addKeywordVariant(variants, seen, [
+      {
+        label,
+        sensitivity,
+        custom: { base64: effectiveCustomBase64 },
+      },
+    ]);
+
+    addKeywordVariant(variants, seen, [
+      {
+        label,
+        custom: { base64: effectiveCustomBase64 },
+      },
+    ]);
+  }
+
+  return variants;
+};
+
+const buildBuiltinKeywordCandidates = (keyword, fallbackLabel) => {
+  if (!keyword) {
+    return [];
+  }
+
+  const variants = [];
+  const seen = new Set();
+
+  addKeywordVariant(variants, seen, [keyword]);
+
+  const builtinValue = extractBuiltinKeywordValue(keyword);
+
+  if (!builtinValue) {
+    return variants;
+  }
+
+  const label = extractKeywordLabel(keyword, fallbackLabel);
+  const sensitivity = normalisePorcupineSensitivity(
+    keyword?.sensitivity ?? keyword?.defaultSensitivity
+  );
+
+  addKeywordVariant(variants, seen, [
+    {
+      label,
+      builtin: builtinValue,
+      sensitivity,
+    },
+  ]);
+
+  addKeywordVariant(variants, seen, [
+    {
+      label,
+      builtin: builtinValue,
+    },
+  ]);
+
+  addKeywordVariant(variants, seen, [{ builtin: builtinValue }]);
+
+  addKeywordVariant(variants, seen, [builtinValue]);
+
+  const lower = builtinValue.toLowerCase();
+  if (lower !== builtinValue) {
+    addKeywordVariant(variants, seen, [lower]);
+  }
+
+  const upper = builtinValue.toUpperCase();
+  if (upper !== builtinValue && upper !== lower) {
+    addKeywordVariant(variants, seen, [upper]);
+  }
+
+  return variants;
+};
+
+const isPorcupineInvalidArgumentError = (error) => {
+  if (!error) {
+    return false;
+  }
+
+  const statusText = (() => {
+    const statusCandidate =
+      typeof error.status === "string"
+        ? error.status
+        : typeof error.code === "string"
+        ? error.code
+        : "";
+
+    return statusCandidate.toLowerCase();
+  })();
+
+  if (statusText.includes("invalid") && statusText.includes("argument")) {
+    return true;
+  }
+
+  const message =
+    typeof error.message === "string" ? error.message.toLowerCase() : "";
+
+  if (!message) {
+    return false;
+  }
+
+  return (
+    message.includes("invalid_argument") ||
+    message.includes("invalid argument") ||
+    message.includes("invalidargument")
+  );
+};
+
+const createPorcupineWorkerWithFallback = async (
+  factory,
+  accessKey,
+  candidateKeywordSets,
+  options
+) => {
+  if (!factory || typeof factory.create !== "function") {
+    throw new Error("porcupine-factory-missing");
+  }
+
+  let lastError = null;
+
+  for (const keywords of candidateKeywordSets) {
+    if (!Array.isArray(keywords) || keywords.length === 0) {
+      continue;
+    }
+
+    try {
+      return await factory.create(accessKey, keywords, options);
+    } catch (error) {
+      lastError = error;
+
+      if (!isPorcupineInvalidArgumentError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return null;
 };
 
 const normaliseLanguage = (language) => {
@@ -1594,7 +1881,7 @@ function App() {
             const keywordBase64 = arrayBufferToBase64(keywordBuffer);
             customKeywordDefinition = {
               label: PICOVOICE_WAKE_WORD_LABEL,
-              sensitivity: 0.6,
+              sensitivity: PICOVOICE_WAKE_WORD_SENSITIVITY,
               base64: keywordBase64,
               custom: {
                 base64: keywordBase64,
@@ -1659,6 +1946,8 @@ function App() {
               return "Le fichier jarvis.ppn est vide. Utilisation du mot-clé intégré \"Jarvis\".";
             case "unavailable":
               return "Impossible de charger le fichier jarvis.ppn. Utilisation du mot-clé intégré \"Jarvis\".";
+            case "keyword-invalid":
+              return "Le fichier jarvis.ppn est invalide ou corrompu. Utilisation du mot-clé intégré \"Jarvis\".";
             default:
               return "Mot-clé intégré \"Jarvis\" utilisé par défaut.";
           }
@@ -1677,31 +1966,54 @@ function App() {
         let fallbackInfo = customKeywordIssue;
 
         if (customKeywordDefinition) {
-          try {
-            porcupineWorker = await PorcupineWorkerFactory.create(
-              wakeWordAccessKey,
-              [customKeywordDefinition],
-              porcupineOptions
-            );
-            fallbackInfo = null;
-          } catch (porcupineError) {
-            if (
-              builtInJarvisKeyword &&
-              isPorcupineVersionMismatchError(porcupineError)
-            ) {
-              fallbackInfo = {
-                type: "keyword-version-mismatch",
-                mismatchDetails: extractPorcupineVersionMismatch(
-                  porcupineError
-                ),
-                libraryVersion: porcupineLibraryVersion,
-              };
-              console.warn(
-                "Mot-clé Porcupine incompatible avec la version embarquée. Utilisation du mot-clé intégré 'Jarvis'.",
-                porcupineError
+          const customKeywordCandidates = buildCustomKeywordCandidates(
+            customKeywordDefinition,
+            PICOVOICE_WAKE_WORD_LABEL
+          );
+
+          if (customKeywordCandidates.length > 0) {
+            try {
+              porcupineWorker = await createPorcupineWorkerWithFallback(
+                PorcupineWorkerFactory,
+                wakeWordAccessKey,
+                customKeywordCandidates,
+                porcupineOptions
               );
-            } else {
-              throw porcupineError;
+
+              if (porcupineWorker) {
+                fallbackInfo = null;
+              }
+            } catch (porcupineError) {
+              if (
+                builtInJarvisKeyword &&
+                (isPorcupineVersionMismatchError(porcupineError) ||
+                  isPorcupineInvalidArgumentError(porcupineError))
+              ) {
+                if (isPorcupineVersionMismatchError(porcupineError)) {
+                  fallbackInfo = {
+                    type: "keyword-version-mismatch",
+                    mismatchDetails: extractPorcupineVersionMismatch(
+                      porcupineError
+                    ),
+                    libraryVersion: porcupineLibraryVersion,
+                  };
+                  console.warn(
+                    "Mot-clé Porcupine incompatible avec la version embarquée. Utilisation du mot-clé intégré 'Jarvis'.",
+                    porcupineError
+                  );
+                } else {
+                  fallbackInfo = {
+                    type: "keyword-invalid",
+                    libraryVersion: porcupineLibraryVersion,
+                  };
+                  console.warn(
+                    "Mot-clé Porcupine personnalisé invalide. Utilisation du mot-clé intégré 'Jarvis'.",
+                    porcupineError
+                  );
+                }
+              } else {
+                throw porcupineError;
+              }
             }
           }
         }
@@ -1711,9 +2023,15 @@ function App() {
             throw new Error("porcupine-jarvis-missing");
           }
 
-          porcupineWorker = await PorcupineWorkerFactory.create(
+          const builtinKeywordCandidates = buildBuiltinKeywordCandidates(
+            builtInJarvisKeyword,
+            PICOVOICE_WAKE_WORD_LABEL
+          );
+
+          porcupineWorker = await createPorcupineWorkerWithFallback(
+            PorcupineWorkerFactory,
             wakeWordAccessKey,
-            [builtInJarvisKeyword],
+            builtinKeywordCandidates,
             porcupineOptions
           );
         }
