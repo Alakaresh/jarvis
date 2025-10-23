@@ -773,6 +773,59 @@ body {
   display: none;
 }
 
+.wake-word-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px;
+  height: 42px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background-color: rgba(56, 60, 76, 0.55);
+  color: #e2e8f0;
+  cursor: pointer;
+  margin-right: 12px;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease, border-color 0.2s ease,
+    transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.wake-word-toggle:hover:not(:disabled),
+.wake-word-toggle:focus-visible:not(:disabled) {
+  background-color: rgba(37, 99, 235, 0.2);
+  border-color: rgba(96, 165, 250, 0.65);
+  transform: translateY(-1px);
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.35);
+}
+
+.wake-word-toggle.active {
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.35), rgba(37, 99, 235, 0.45));
+  border-color: rgba(56, 189, 248, 0.65);
+  color: #f8fafc;
+  box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.45);
+}
+
+.wake-word-toggle:disabled {
+  cursor: not-allowed;
+  border-color: rgba(148, 163, 184, 0.2);
+  color: rgba(148, 163, 184, 0.6);
+  background-color: rgba(55, 65, 81, 0.35);
+  box-shadow: none;
+  transform: none;
+}
+
+.wake-word-toggle .wake-word-toggle-icon {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.wake-word-toggle .wake-word-toggle-text {
+  font-size: 0.9rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .voice-input-button {
   display: inline-flex;
   align-items: center;
