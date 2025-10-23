@@ -637,6 +637,8 @@ function App() {
   const wakeWordProcessorRef = useRef(null);
   const wakeWordGainNodeRef = useRef(null);
   const wakeWordFloatBufferRef = useRef(new Float32Array(0));
+  const wakeWordVoiceProcessorRef = useRef(null);
+  const wakeWordVoiceProcessorControlsRef = useRef(null);
   const wakeWordSetupPromiseRef = useRef(null);
   const wakeWordSetupTokenRef = useRef(0);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
@@ -692,6 +694,41 @@ function App() {
 
   const releaseWakeWordResources = useCallback(() => {
     wakeWordSetupTokenRef.current += 1;
+
+    const callAndForget = (fn, warningMessage) => {
+      if (typeof fn !== "function") {
+        return;
+      }
+
+      try {
+        const result = fn();
+        if (result && typeof result.then === "function") {
+          result.catch((error) => {
+            console.warn(warningMessage, error);
+          });
+        }
+      } catch (error) {
+        console.warn(warningMessage, error);
+      }
+    };
+
+    const voiceProcessorControls = wakeWordVoiceProcessorControlsRef.current;
+    if (voiceProcessorControls) {
+      callAndForget(
+        voiceProcessorControls.unsubscribe,
+        "Impossible de se désabonner de WebVoiceProcessor pour le mot-clé"
+      );
+      callAndForget(
+        voiceProcessorControls.stop,
+        "Impossible d'arrêter WebVoiceProcessor pour le mot-clé"
+      );
+      callAndForget(
+        voiceProcessorControls.release,
+        "Impossible de libérer WebVoiceProcessor pour le mot-clé"
+      );
+    }
+    wakeWordVoiceProcessorControlsRef.current = null;
+    wakeWordVoiceProcessorRef.current = null;
 
     const processorNode = wakeWordProcessorRef.current;
     if (processorNode) {
@@ -1316,18 +1353,47 @@ function App() {
     const setupToken = wakeWordSetupTokenRef.current;
     const setupPromise = (async () => {
       try {
-        const [porcupineModule, keywordResponse] = await Promise.all([
-          import("@picovoice/porcupine-web"),
-          fetch(PICOVOICE_KEYWORD_PATH),
-        ]);
+        const resolvePorcupineFactory = (module) => {
+          if (!module) {
+            return null;
+          }
 
-        const PorcupineWorkerFactory =
-          porcupineModule?.PorcupineWorkerFactory ??
-          porcupineModule?.default?.PorcupineWorkerFactory ??
-          porcupineModule?.default ??
-          null;
+          const candidates = [
+            module?.PorcupineWorkerFactory,
+            module?.default?.PorcupineWorkerFactory,
+            module?.default,
+            module,
+          ];
 
-        if (!PorcupineWorkerFactory?.create) {
+          return (
+            candidates.find(
+              (candidate) => candidate && typeof candidate.create === "function"
+            ) ?? null
+          );
+        };
+
+        const porcupineModulePromise = import("@picovoice/porcupine-web-en-worker");
+        const voiceProcessorModulePromise = import(
+          "@picovoice/web-voice-processor"
+        ).catch((error) => {
+          console.warn(
+            "Impossible de charger @picovoice/web-voice-processor pour le mode réveil",
+            error
+          );
+          return null;
+        });
+        const keywordResponsePromise = fetch(PICOVOICE_KEYWORD_PATH);
+
+        const [porcupineModule, voiceProcessorModule, keywordResponse] =
+          await Promise.all([
+            porcupineModulePromise,
+            voiceProcessorModulePromise,
+            keywordResponsePromise,
+          ]);
+
+        const PorcupineWorkerFactory = resolvePorcupineFactory(porcupineModule);
+
+        if (!PorcupineWorkerFactory) {
           throw new Error("porcupine-factory-missing");
         }
 
@@ -1372,7 +1438,10 @@ function App() {
           try {
             porcupineWorker.postMessage?.({ command: "release" });
           } catch (error) {
-            console.warn("Impossible de relâcher le worker Porcupine après annulation", error);
+            console.warn(
+              "Impossible de relâcher le worker Porcupine après annulation",
+              error
+            );
           }
           porcupineWorker.terminate?.();
           return;
@@ -1413,91 +1482,237 @@ function App() {
           }
         };
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: 1,
-            sampleRate: PICOVOICE_SAMPLE_RATE,
-          },
-        });
+        const WebVoiceProcessor =
+          voiceProcessorModule?.WebVoiceProcessor ??
+          voiceProcessorModule?.default?.WebVoiceProcessor ??
+          voiceProcessorModule?.default ??
+          voiceProcessorModule ??
+          null;
 
-        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
-          stream.getTracks().forEach((track) => {
-            try {
-              track.stop();
-            } catch (error) {
-              console.warn("Impossible d'arrêter une piste micro après annulation", error);
+        let voiceProcessorControls = null;
+
+        if (WebVoiceProcessor) {
+          try {
+            const callMaybeAsync = async (fn, context, ...args) => {
+              if (typeof fn !== "function") {
+                return null;
+              }
+              const result = fn.apply(context, args);
+              if (result && typeof result.then === "function") {
+                return await result;
+              }
+              return result;
+            };
+
+            let subscription = null;
+
+            if (typeof WebVoiceProcessor.subscribe === "function") {
+              subscription = await callMaybeAsync(
+                WebVoiceProcessor.subscribe,
+                WebVoiceProcessor,
+                porcupineWorker
+              );
             }
-          });
-          return;
+
+            const startCandidate =
+              subscription && typeof subscription.start === "function"
+                ? { fn: subscription.start, context: subscription }
+                : typeof WebVoiceProcessor.start === "function"
+                ? { fn: WebVoiceProcessor.start, context: WebVoiceProcessor }
+                : null;
+
+            if (startCandidate) {
+              await callMaybeAsync(startCandidate.fn, startCandidate.context);
+            }
+
+            const stopCandidate =
+              subscription && typeof subscription.stop === "function"
+                ? { fn: subscription.stop, context: subscription }
+                : typeof WebVoiceProcessor.stop === "function"
+                ? { fn: WebVoiceProcessor.stop, context: WebVoiceProcessor }
+                : null;
+
+            const releaseCandidate =
+              subscription && typeof subscription.release === "function"
+                ? { fn: subscription.release, context: subscription }
+                : typeof WebVoiceProcessor.release === "function"
+                ? { fn: WebVoiceProcessor.release, context: WebVoiceProcessor }
+                : null;
+
+            const unsubscribeCandidate =
+              typeof WebVoiceProcessor.unsubscribe === "function"
+                ? { fn: WebVoiceProcessor.unsubscribe, context: WebVoiceProcessor }
+                : subscription && typeof subscription.unsubscribe === "function"
+                ? { fn: subscription.unsubscribe, context: subscription }
+                : null;
+
+            voiceProcessorControls = {
+              voiceProcessor:
+                subscription?.voiceProcessor ??
+                subscription?.processor ??
+                subscription?.instance ??
+                (subscription && typeof subscription === "object"
+                  ? subscription
+                  : WebVoiceProcessor),
+              stop: stopCandidate
+                ? () => callMaybeAsync(stopCandidate.fn, stopCandidate.context)
+                : null,
+              release: releaseCandidate
+                ? () =>
+                    callMaybeAsync(
+                      releaseCandidate.fn,
+                      releaseCandidate.context
+                    )
+                : null,
+              unsubscribe: unsubscribeCandidate
+                ? () =>
+                    callMaybeAsync(
+                      unsubscribeCandidate.fn,
+                      unsubscribeCandidate.context,
+                      porcupineWorker
+                    )
+                : null,
+            };
+          } catch (voiceProcessorError) {
+            try {
+              if (typeof WebVoiceProcessor.unsubscribe === "function") {
+                await callMaybeAsync(
+                  WebVoiceProcessor.unsubscribe,
+                  WebVoiceProcessor,
+                  porcupineWorker
+                );
+              } else if (
+                subscription &&
+                typeof subscription.unsubscribe === "function"
+              ) {
+                await callMaybeAsync(
+                  subscription.unsubscribe,
+                  subscription,
+                  porcupineWorker
+                );
+              }
+            } catch (cleanupError) {
+              console.warn(
+                "Impossible de nettoyer WebVoiceProcessor après un échec d'initialisation",
+                cleanupError
+              );
+            }
+
+            console.warn(
+              "Impossible d'initialiser WebVoiceProcessor pour le mode réveil",
+              voiceProcessorError
+            );
+            voiceProcessorControls = null;
+          }
         }
 
-        wakeWordStreamRef.current = stream;
+        wakeWordVoiceProcessorRef.current =
+          voiceProcessorControls?.voiceProcessor ?? null;
+        wakeWordVoiceProcessorControlsRef.current = voiceProcessorControls;
 
-        const audioContext = new AudioContextClass({
-          latencyHint: "interactive",
-          sampleRate: PICOVOICE_SAMPLE_RATE,
-        });
-        wakeWordAudioContextRef.current = audioContext;
+        if (!voiceProcessorControls) {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: PICOVOICE_SAMPLE_RATE,
+            },
+          });
 
-        const sourceNode = audioContext.createMediaStreamSource(stream);
-        wakeWordSourceRef.current = sourceNode;
-
-        const processorNode = audioContext.createScriptProcessor(
-          PORCUPINE_FRAME_LENGTH,
-          1,
-          1
-        );
-        wakeWordProcessorRef.current = processorNode;
-
-        const gainNode = audioContext.createGain();
-        gainNode.gain.value = 0;
-        wakeWordGainNodeRef.current = gainNode;
-
-        wakeWordFloatBufferRef.current = new Float32Array(0);
-
-        processorNode.onaudioprocess = (event) => {
-          const worker = porcupineWorkerRef.current;
-          if (!worker) {
+          if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+            stream.getTracks().forEach((track) => {
+              try {
+                track.stop();
+              } catch (error) {
+                console.warn(
+                  "Impossible d'arrêter une piste micro après annulation",
+                  error
+                );
+              }
+            });
             return;
           }
 
-          const inputFrame = event.inputBuffer.getChannelData(0);
-          const previous = wakeWordFloatBufferRef.current;
-          const merged = new Float32Array(previous.length + inputFrame.length);
-          merged.set(previous);
-          merged.set(inputFrame, previous.length);
+          wakeWordStreamRef.current = stream;
 
-          let offset = 0;
-          while (offset + PORCUPINE_FRAME_LENGTH <= merged.length) {
-            const frameSlice = merged.subarray(offset, offset + PORCUPINE_FRAME_LENGTH);
-            const int16Frame = convertFloatFrameToInt16(frameSlice);
-            try {
-              worker.postMessage(
-                { command: "process", inputFrame: int16Frame },
-                [int16Frame.buffer]
+          const audioContext = new AudioContextClass({
+            latencyHint: "interactive",
+            sampleRate: PICOVOICE_SAMPLE_RATE,
+          });
+          wakeWordAudioContextRef.current = audioContext;
+
+          const sourceNode = audioContext.createMediaStreamSource(stream);
+          wakeWordSourceRef.current = sourceNode;
+
+          const processorNode = audioContext.createScriptProcessor(
+            PORCUPINE_FRAME_LENGTH,
+            1,
+            1
+          );
+          wakeWordProcessorRef.current = processorNode;
+
+          const gainNode = audioContext.createGain();
+          gainNode.gain.value = 0;
+          wakeWordGainNodeRef.current = gainNode;
+
+          wakeWordFloatBufferRef.current = new Float32Array(0);
+
+          processorNode.onaudioprocess = (event) => {
+            const worker = porcupineWorkerRef.current;
+            if (!worker) {
+              return;
+            }
+
+            const inputFrame = event.inputBuffer.getChannelData(0);
+            const previous = wakeWordFloatBufferRef.current;
+            const merged = new Float32Array(previous.length + inputFrame.length);
+            merged.set(previous);
+            merged.set(inputFrame, previous.length);
+
+            let offset = 0;
+            while (offset + PORCUPINE_FRAME_LENGTH <= merged.length) {
+              const frameSlice = merged.subarray(
+                offset,
+                offset + PORCUPINE_FRAME_LENGTH
               );
+              const int16Frame = convertFloatFrameToInt16(frameSlice);
+              try {
+                worker.postMessage(
+                  { command: "process", inputFrame: int16Frame },
+                  [int16Frame.buffer]
+                );
+              } catch (error) {
+                console.error(
+                  "Impossible d'envoyer les données audio au worker Porcupine",
+                  error
+                );
+              }
+              offset += PORCUPINE_FRAME_LENGTH;
+            }
+
+            wakeWordFloatBufferRef.current = merged.slice(offset);
+          };
+
+          sourceNode.connect(processorNode);
+          processorNode.connect(gainNode);
+          gainNode.connect(audioContext.destination);
+
+          if (audioContext.state === "suspended") {
+            try {
+              await audioContext.resume();
             } catch (error) {
-              console.error(
-                "Impossible d'envoyer les données audio au worker Porcupine",
+              console.warn(
+                "Impossible de reprendre l'AudioContext pour le mode réveil",
                 error
               );
             }
-            offset += PORCUPINE_FRAME_LENGTH;
           }
-
-          wakeWordFloatBufferRef.current = merged.slice(offset);
-        };
-
-        sourceNode.connect(processorNode);
-        processorNode.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-
-        if (audioContext.state === "suspended") {
-          try {
-            await audioContext.resume();
-          } catch (error) {
-            console.warn("Impossible de reprendre l'AudioContext pour le mode réveil", error);
-          }
+        } else {
+          wakeWordStreamRef.current = null;
+          wakeWordAudioContextRef.current = null;
+          wakeWordSourceRef.current = null;
+          wakeWordProcessorRef.current = null;
+          wakeWordGainNodeRef.current = null;
+          wakeWordFloatBufferRef.current = new Float32Array(0);
         }
 
         setVoiceError((previous) => {
@@ -1523,7 +1738,7 @@ function App() {
           );
         } else if (error?.message === "porcupine-factory-missing") {
           setVoiceError(
-            "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web."
+            "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web-en-worker et de @picovoice/web-voice-processor."
           );
         } else if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
           setVoiceError(
