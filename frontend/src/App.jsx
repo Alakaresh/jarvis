@@ -1419,6 +1419,7 @@ function App() {
             {
               label: PICOVOICE_WAKE_WORD_LABEL,
               sensitivity: 0.6,
+              base64: keywordBase64,
               custom: {
                 base64: keywordBase64,
               },
