@@ -322,36 +322,50 @@ const getJarvisKeywordFromEnum = (enumCandidate) => {
   return matchingValue ?? null;
 };
 
-const resolvePorcupineExports = (module) => {
+const resolvePorcupineModule = (module) => {
   if (!module) {
     return {
-      factory: null,
+      porcupineClass: null,
       jarvisKeyword: null,
       keywordEnum: null,
+      version: null,
     };
   }
 
-  const factoryCandidates = [
-    module?.PorcupineWorkerFactory,
-    module?.default?.PorcupineWorkerFactory,
+  const porcupineCandidates = [
+    module?.Porcupine,
+    module?.default?.Porcupine,
     module?.default,
     module,
   ];
 
-  const factory = factoryCandidates.find(
-    (candidate) => candidate && typeof candidate.create === "function"
-  );
+  const porcupineClass = porcupineCandidates.find((candidate) => {
+    if (!candidate) {
+      return false;
+    }
+
+    if (typeof candidate.create === "function") {
+      return true;
+    }
+
+    if (typeof candidate === "function") {
+      const proto = candidate.prototype;
+      return !!proto && typeof proto.process === "function";
+    }
+
+    return false;
+  });
 
   const keywordCandidates = [
-    module?.PorcupineKeyword,
-    module?.PorcupineKeywords,
     module?.BuiltInKeyword,
     module?.BuiltInKeywords,
+    module?.PorcupineKeyword,
+    module?.PorcupineKeywords,
     module?.Keywords,
-    module?.default?.PorcupineKeyword,
-    module?.default?.PorcupineKeywords,
     module?.default?.BuiltInKeyword,
     module?.default?.BuiltInKeywords,
+    module?.default?.PorcupineKeyword,
+    module?.default?.PorcupineKeywords,
     module?.default?.Keywords,
   ];
 
@@ -359,10 +373,24 @@ const resolvePorcupineExports = (module) => {
     (candidate) => candidate && typeof candidate === "object"
   );
 
+  const versionCandidates = [
+    module?.version,
+    module?.PORCUPINE_VERSION,
+    module?.PorcupineVersion,
+    module?.default?.version,
+    module?.default?.PORCUPINE_VERSION,
+    module?.default?.PorcupineVersion,
+  ];
+
+  const libraryVersion = versionCandidates.find(
+    (candidate) => typeof candidate === "string" && candidate
+  );
+
   return {
-    factory: factory ?? null,
+    porcupineClass: porcupineClass ?? null,
     jarvisKeyword: getJarvisKeywordFromEnum(keywordEnum),
     keywordEnum: keywordEnum ?? null,
+    version: libraryVersion ?? null,
   };
 };
 
@@ -617,13 +645,13 @@ const isPorcupineInvalidArgumentError = (error) => {
   );
 };
 
-const createPorcupineWorkerWithFallback = async (
-  factory,
+const createPorcupineInstanceWithFallback = async (
+  porcupineClass,
   accessKey,
   candidateKeywordSets,
   options
 ) => {
-  if (!factory || typeof factory.create !== "function") {
+  if (!porcupineClass || typeof porcupineClass.create !== "function") {
     throw new Error("porcupine-factory-missing");
   }
 
@@ -635,7 +663,7 @@ const createPorcupineWorkerWithFallback = async (
     }
 
     try {
-      return await factory.create(accessKey, keywords, options);
+      return await porcupineClass.create(accessKey, keywords, options);
     } catch (error) {
       lastError = error;
 
@@ -650,6 +678,50 @@ const createPorcupineWorkerWithFallback = async (
   }
 
   return null;
+};
+
+const getPorcupineFrameLength = (porcupineInstance) => {
+  if (!porcupineInstance) {
+    return PORCUPINE_FRAME_LENGTH;
+  }
+
+  const candidates = [
+    porcupineInstance.frameLength,
+    porcupineInstance.frame_length,
+    typeof porcupineInstance.getFrameLength === "function"
+      ? porcupineInstance.getFrameLength()
+      : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+
+  return PORCUPINE_FRAME_LENGTH;
+};
+
+const getPorcupineSampleRate = (porcupineInstance) => {
+  if (!porcupineInstance) {
+    return PICOVOICE_SAMPLE_RATE;
+  }
+
+  const candidates = [
+    porcupineInstance.sampleRate,
+    porcupineInstance.sample_rate,
+    typeof porcupineInstance.getSampleRate === "function"
+      ? porcupineInstance.getSampleRate()
+      : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+
+  return PICOVOICE_SAMPLE_RATE;
 };
 
 const normaliseLanguage = (language) => {
@@ -1061,15 +1133,13 @@ function App() {
   const peerConnectionRef = useRef(null);
   const realtimeStreamRef = useRef(null);
   const realtimeRemoteAudioRef = useRef(null);
-  const porcupineWorkerRef = useRef(null);
+  const porcupineRef = useRef(null);
   const wakeWordAudioContextRef = useRef(null);
   const wakeWordStreamRef = useRef(null);
   const wakeWordSourceRef = useRef(null);
   const wakeWordProcessorRef = useRef(null);
   const wakeWordGainNodeRef = useRef(null);
   const wakeWordFloatBufferRef = useRef(new Float32Array(0));
-  const wakeWordVoiceProcessorRef = useRef(null);
-  const wakeWordVoiceProcessorControlsRef = useRef(null);
   const wakeWordSetupPromiseRef = useRef(null);
   const wakeWordSetupTokenRef = useRef(0);
   const [isTranscribingAudio, setIsTranscribingAudio] = useState(false);
@@ -1126,41 +1196,6 @@ function App() {
   const releaseWakeWordResources = useCallback(() => {
     wakeWordSetupTokenRef.current += 1;
 
-    const callAndForget = (fn, warningMessage) => {
-      if (typeof fn !== "function") {
-        return;
-      }
-
-      try {
-        const result = fn();
-        if (result && typeof result.then === "function") {
-          result.catch((error) => {
-            console.warn(warningMessage, error);
-          });
-        }
-      } catch (error) {
-        console.warn(warningMessage, error);
-      }
-    };
-
-    const voiceProcessorControls = wakeWordVoiceProcessorControlsRef.current;
-    if (voiceProcessorControls) {
-      callAndForget(
-        voiceProcessorControls.unsubscribe,
-        "Impossible de se désabonner de WebVoiceProcessor pour le mot-clé"
-      );
-      callAndForget(
-        voiceProcessorControls.stop,
-        "Impossible d'arrêter WebVoiceProcessor pour le mot-clé"
-      );
-      callAndForget(
-        voiceProcessorControls.release,
-        "Impossible de libérer WebVoiceProcessor pour le mot-clé"
-      );
-    }
-    wakeWordVoiceProcessorControlsRef.current = null;
-    wakeWordVoiceProcessorRef.current = null;
-
     const processorNode = wakeWordProcessorRef.current;
     if (processorNode) {
       try {
@@ -1214,23 +1249,23 @@ function App() {
     }
     wakeWordStreamRef.current = null;
 
-    const worker = porcupineWorkerRef.current;
-    if (worker) {
+    const porcupineInstance = porcupineRef.current;
+    if (porcupineInstance) {
+      porcupineRef.current = null;
       try {
-        worker.postMessage({ command: "release" });
+        const releaseResult =
+          typeof porcupineInstance.release === "function"
+            ? porcupineInstance.release()
+            : null;
+        if (releaseResult && typeof releaseResult.then === "function") {
+          releaseResult.catch((error) => {
+            console.warn("Impossible de libérer l'instance Porcupine", error);
+          });
+        }
       } catch (error) {
-        console.warn("Impossible d'envoyer la commande release au worker Porcupine", error);
+        console.warn("Impossible de libérer l'instance Porcupine", error);
       }
-
-      try {
-        worker.terminate?.();
-      } catch (error) {
-        console.warn("Impossible de terminer le worker Porcupine", error);
-      }
-
-      worker.onmessage = null;
     }
-    porcupineWorkerRef.current = null;
     wakeWordFloatBufferRef.current = new Float32Array(0);
     wakeWordSetupPromiseRef.current = null;
   }, []);
@@ -1753,7 +1788,7 @@ function App() {
   }, [releaseWakeWordResources, realtimeVoice, stopRealtimeSession]);
 
   const initializeWakeWordDetection = useCallback(async () => {
-    if (!isWakeWordEnabled || porcupineWorkerRef.current || wakeWordSetupPromiseRef.current) {
+    if (!isWakeWordEnabled || porcupineRef.current || wakeWordSetupPromiseRef.current) {
       return;
     }
 
@@ -1786,16 +1821,7 @@ function App() {
       let porcupineLibraryVersion = null;
 
       try {
-        const porcupineModulePromise = import("@picovoice/porcupine-web-en-worker");
-        const voiceProcessorModulePromise = import(
-          "@picovoice/web-voice-processor"
-        ).catch((error) => {
-          console.warn(
-            "Impossible de charger @picovoice/web-voice-processor pour le mode réveil",
-            error
-          );
-          return null;
-        });
+        const porcupineModulePromise = import("@picovoice/porcupine-web");
         const keywordResponsePromise = fetch(PICOVOICE_KEYWORD_PATH).catch(
           (error) => {
             console.warn(
@@ -1806,24 +1832,20 @@ function App() {
           }
         );
 
-        const [porcupineModule, voiceProcessorModule, keywordResponse] =
-          await Promise.all([
-            porcupineModulePromise,
-            voiceProcessorModulePromise,
-            keywordResponsePromise,
-          ]);
+        const [porcupineModule, keywordResponse] = await Promise.all([
+          porcupineModulePromise,
+          keywordResponsePromise,
+        ]);
 
         const {
-          factory: PorcupineWorkerFactory,
+          porcupineClass: PorcupineClass,
           jarvisKeyword: builtInJarvisKeyword,
-        } = resolvePorcupineExports(porcupineModule);
+          version: moduleVersion,
+        } = resolvePorcupineModule(porcupineModule);
 
-        porcupineLibraryVersion =
-          typeof PorcupineWorkerFactory?.version === "string"
-            ? PorcupineWorkerFactory.version
-            : null;
+        porcupineLibraryVersion = moduleVersion;
 
-        if (!PorcupineWorkerFactory) {
+        if (!PorcupineClass) {
           throw new Error("porcupine-factory-missing");
         }
 
@@ -1962,7 +1984,7 @@ function App() {
           },
         };
 
-        let porcupineWorker = null;
+        let porcupineInstance = null;
         let fallbackInfo = customKeywordIssue;
 
         if (customKeywordDefinition) {
@@ -1973,14 +1995,14 @@ function App() {
 
           if (customKeywordCandidates.length > 0) {
             try {
-              porcupineWorker = await createPorcupineWorkerWithFallback(
-                PorcupineWorkerFactory,
+              porcupineInstance = await createPorcupineInstanceWithFallback(
+                PorcupineClass,
                 wakeWordAccessKey,
                 customKeywordCandidates,
                 porcupineOptions
               );
 
-              if (porcupineWorker) {
+              if (porcupineInstance) {
                 fallbackInfo = null;
               }
             } catch (porcupineError) {
@@ -2018,7 +2040,7 @@ function App() {
           }
         }
 
-        if (!porcupineWorker) {
+        if (!porcupineInstance) {
           if (!builtInJarvisKeyword) {
             throw new Error("porcupine-jarvis-missing");
           }
@@ -2028,293 +2050,172 @@ function App() {
             PICOVOICE_WAKE_WORD_LABEL
           );
 
-          porcupineWorker = await createPorcupineWorkerWithFallback(
-            PorcupineWorkerFactory,
+          porcupineInstance = await createPorcupineInstanceWithFallback(
+            PorcupineClass,
             wakeWordAccessKey,
             builtinKeywordCandidates,
             porcupineOptions
           );
         }
 
+        if (!porcupineInstance) {
+          throw new Error("porcupine-instance-missing");
+        }
+
         if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
           try {
-            porcupineWorker.postMessage?.({ command: "release" });
+            if (typeof porcupineInstance.release === "function") {
+              await porcupineInstance.release();
+            }
           } catch (error) {
             console.warn(
-              "Impossible de relâcher le worker Porcupine après annulation",
+              "Impossible de libérer l'instance Porcupine après annulation",
               error
             );
           }
-          porcupineWorker.terminate?.();
           return;
         }
 
-        porcupineWorkerRef.current = porcupineWorker;
+        porcupineRef.current = porcupineInstance;
 
-        porcupineWorker.onmessage = (event) => {
-          const payload = event?.data;
-          if (!payload) {
-            return;
-          }
+        const porcupineFrameLength = getPorcupineFrameLength(porcupineInstance);
+        const porcupineSampleRate = getPorcupineSampleRate(porcupineInstance);
 
-          const detectedKeyword =
-            typeof payload === "number" ||
-            payload?.command === "keyword" ||
-            payload?.keywordLabel ||
-            payload?.label;
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            channelCount: 1,
+            sampleRate: porcupineSampleRate,
+          },
+        });
 
-          if (detectedKeyword) {
-            if (isRealtimeActiveRef.current) {
-              return;
-            }
-
-            releaseWakeWordResources();
-            startRealtimeSession();
-            return;
-          }
-
-          if (payload?.command === "error") {
-            console.error(
-              "Erreur renvoyée par le worker Porcupine",
-              payload?.message ?? payload
-            );
-            setVoiceError(
-              "Erreur du moteur de réveil vocal. Rafraîchis la page ou vérifie le fichier .ppn."
-            );
-          }
-        };
-
-        const WebVoiceProcessor =
-          voiceProcessorModule?.WebVoiceProcessor ??
-          voiceProcessorModule?.default?.WebVoiceProcessor ??
-          voiceProcessorModule?.default ??
-          voiceProcessorModule ??
-          null;
-
-        let voiceProcessorControls = null;
-
-        if (WebVoiceProcessor) {
-          try {
-            const callMaybeAsync = async (fn, context, ...args) => {
-              if (typeof fn !== "function") {
-                return null;
-              }
-              const result = fn.apply(context, args);
-              if (result && typeof result.then === "function") {
-                return await result;
-              }
-              return result;
-            };
-
-            let subscription = null;
-
-            if (typeof WebVoiceProcessor.subscribe === "function") {
-              subscription = await callMaybeAsync(
-                WebVoiceProcessor.subscribe,
-                WebVoiceProcessor,
-                porcupineWorker
-              );
-            }
-
-            const startCandidate =
-              subscription && typeof subscription.start === "function"
-                ? { fn: subscription.start, context: subscription }
-                : typeof WebVoiceProcessor.start === "function"
-                ? { fn: WebVoiceProcessor.start, context: WebVoiceProcessor }
-                : null;
-
-            if (startCandidate) {
-              await callMaybeAsync(startCandidate.fn, startCandidate.context);
-            }
-
-            const stopCandidate =
-              subscription && typeof subscription.stop === "function"
-                ? { fn: subscription.stop, context: subscription }
-                : typeof WebVoiceProcessor.stop === "function"
-                ? { fn: WebVoiceProcessor.stop, context: WebVoiceProcessor }
-                : null;
-
-            const releaseCandidate =
-              subscription && typeof subscription.release === "function"
-                ? { fn: subscription.release, context: subscription }
-                : typeof WebVoiceProcessor.release === "function"
-                ? { fn: WebVoiceProcessor.release, context: WebVoiceProcessor }
-                : null;
-
-            const unsubscribeCandidate =
-              typeof WebVoiceProcessor.unsubscribe === "function"
-                ? { fn: WebVoiceProcessor.unsubscribe, context: WebVoiceProcessor }
-                : subscription && typeof subscription.unsubscribe === "function"
-                ? { fn: subscription.unsubscribe, context: subscription }
-                : null;
-
-            voiceProcessorControls = {
-              voiceProcessor:
-                subscription?.voiceProcessor ??
-                subscription?.processor ??
-                subscription?.instance ??
-                (subscription && typeof subscription === "object"
-                  ? subscription
-                  : WebVoiceProcessor),
-              stop: stopCandidate
-                ? () => callMaybeAsync(stopCandidate.fn, stopCandidate.context)
-                : null,
-              release: releaseCandidate
-                ? () =>
-                    callMaybeAsync(
-                      releaseCandidate.fn,
-                      releaseCandidate.context
-                    )
-                : null,
-              unsubscribe: unsubscribeCandidate
-                ? () =>
-                    callMaybeAsync(
-                      unsubscribeCandidate.fn,
-                      unsubscribeCandidate.context,
-                      porcupineWorker
-                    )
-                : null,
-            };
-          } catch (voiceProcessorError) {
+        if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
+          stream.getTracks().forEach((track) => {
             try {
-              if (typeof WebVoiceProcessor.unsubscribe === "function") {
-                await callMaybeAsync(
-                  WebVoiceProcessor.unsubscribe,
-                  WebVoiceProcessor,
-                  porcupineWorker
-                );
-              } else if (
-                subscription &&
-                typeof subscription.unsubscribe === "function"
-              ) {
-                await callMaybeAsync(
-                  subscription.unsubscribe,
-                  subscription,
-                  porcupineWorker
-                );
-              }
-            } catch (cleanupError) {
-              console.warn(
-                "Impossible de nettoyer WebVoiceProcessor après un échec d'initialisation",
-                cleanupError
-              );
-            }
-
-            console.warn(
-              "Impossible d'initialiser WebVoiceProcessor pour le mode réveil",
-              voiceProcessorError
-            );
-            voiceProcessorControls = null;
-          }
-        }
-
-        wakeWordVoiceProcessorRef.current =
-          voiceProcessorControls?.voiceProcessor ?? null;
-        wakeWordVoiceProcessorControlsRef.current = voiceProcessorControls;
-
-        if (!voiceProcessorControls) {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              channelCount: 1,
-              sampleRate: PICOVOICE_SAMPLE_RATE,
-            },
-          });
-
-          if (wakeWordSetupTokenRef.current !== setupToken || !isWakeWordEnabled) {
-            stream.getTracks().forEach((track) => {
-              try {
-                track.stop();
-              } catch (error) {
-                console.warn(
-                  "Impossible d'arrêter une piste micro après annulation",
-                  error
-                );
-              }
-            });
-            return;
-          }
-
-          wakeWordStreamRef.current = stream;
-
-          const audioContext = new AudioContextClass({
-            latencyHint: "interactive",
-            sampleRate: PICOVOICE_SAMPLE_RATE,
-          });
-          wakeWordAudioContextRef.current = audioContext;
-
-          const sourceNode = audioContext.createMediaStreamSource(stream);
-          wakeWordSourceRef.current = sourceNode;
-
-          const processorNode = audioContext.createScriptProcessor(
-            PORCUPINE_FRAME_LENGTH,
-            1,
-            1
-          );
-          wakeWordProcessorRef.current = processorNode;
-
-          const gainNode = audioContext.createGain();
-          gainNode.gain.value = 0;
-          wakeWordGainNodeRef.current = gainNode;
-
-          wakeWordFloatBufferRef.current = new Float32Array(0);
-
-          processorNode.onaudioprocess = (event) => {
-            const worker = porcupineWorkerRef.current;
-            if (!worker) {
-              return;
-            }
-
-            const inputFrame = event.inputBuffer.getChannelData(0);
-            const previous = wakeWordFloatBufferRef.current;
-            const merged = new Float32Array(previous.length + inputFrame.length);
-            merged.set(previous);
-            merged.set(inputFrame, previous.length);
-
-            let offset = 0;
-            while (offset + PORCUPINE_FRAME_LENGTH <= merged.length) {
-              const frameSlice = merged.subarray(
-                offset,
-                offset + PORCUPINE_FRAME_LENGTH
-              );
-              const int16Frame = convertFloatFrameToInt16(frameSlice);
-              try {
-                worker.postMessage(
-                  { command: "process", inputFrame: int16Frame },
-                  [int16Frame.buffer]
-                );
-              } catch (error) {
-                console.error(
-                  "Impossible d'envoyer les données audio au worker Porcupine",
-                  error
-                );
-              }
-              offset += PORCUPINE_FRAME_LENGTH;
-            }
-
-            wakeWordFloatBufferRef.current = merged.slice(offset);
-          };
-
-          sourceNode.connect(processorNode);
-          processorNode.connect(gainNode);
-          gainNode.connect(audioContext.destination);
-
-          if (audioContext.state === "suspended") {
-            try {
-              await audioContext.resume();
+              track.stop();
             } catch (error) {
               console.warn(
-                "Impossible de reprendre l'AudioContext pour le mode réveil",
+                "Impossible d'arrêter une piste micro après annulation",
                 error
               );
             }
+          });
+
+          try {
+            if (typeof porcupineInstance.release === "function") {
+              await porcupineInstance.release();
+            }
+          } catch (error) {
+            console.warn(
+              "Impossible de libérer l'instance Porcupine après annulation",
+              error
+            );
           }
-        } else {
-          wakeWordStreamRef.current = null;
-          wakeWordAudioContextRef.current = null;
-          wakeWordSourceRef.current = null;
-          wakeWordProcessorRef.current = null;
-          wakeWordGainNodeRef.current = null;
-          wakeWordFloatBufferRef.current = new Float32Array(0);
+          return;
+        }
+
+        wakeWordStreamRef.current = stream;
+
+        const audioContext = new AudioContextClass({
+          latencyHint: "interactive",
+          sampleRate: porcupineSampleRate,
+        });
+        wakeWordAudioContextRef.current = audioContext;
+
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        wakeWordSourceRef.current = sourceNode;
+
+        const processorNode = audioContext.createScriptProcessor(
+          porcupineFrameLength,
+          1,
+          1
+        );
+        wakeWordProcessorRef.current = processorNode;
+
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 0;
+        wakeWordGainNodeRef.current = gainNode;
+
+        wakeWordFloatBufferRef.current = new Float32Array(0);
+
+        processorNode.onaudioprocess = (event) => {
+          const instance = porcupineRef.current;
+          if (!instance) {
+            wakeWordFloatBufferRef.current = new Float32Array(0);
+            return;
+          }
+
+          const frameLength = getPorcupineFrameLength(instance);
+          const inputFrame = event.inputBuffer.getChannelData(0);
+          const previous = wakeWordFloatBufferRef.current;
+          const merged = new Float32Array(previous.length + inputFrame.length);
+          merged.set(previous);
+          merged.set(inputFrame, previous.length);
+
+          let offset = 0;
+          while (offset + frameLength <= merged.length) {
+            const frameSlice = merged.subarray(offset, offset + frameLength);
+            const int16Frame = convertFloatFrameToInt16(frameSlice);
+
+            try {
+              const result = instance.process(int16Frame);
+
+              const detectedIndex =
+                typeof result === "number" && Number.isFinite(result)
+                  ? result
+                  : null;
+              const detectedLabel =
+                result && typeof result === "object"
+                  ? typeof result.keywordLabel === "string"
+                    ? result.keywordLabel
+                    : typeof result.label === "string"
+                    ? result.label
+                    : null
+                  : null;
+
+              const hasDetection =
+                (typeof detectedIndex === "number" && detectedIndex >= 0) ||
+                !!detectedLabel ||
+                (Array.isArray(result) && result.length > 0);
+
+              if (hasDetection) {
+                if (isRealtimeActiveRef.current) {
+                  return;
+                }
+
+                releaseWakeWordResources();
+                startRealtimeSession();
+                return;
+              }
+            } catch (processError) {
+              console.error(
+                "Impossible de traiter les données audio avec Porcupine",
+                processError
+              );
+              setVoiceError(
+                "Erreur du moteur de réveil vocal. Rafraîchis la page ou vérifie le fichier .ppn."
+              );
+              break;
+            }
+
+            offset += frameLength;
+          }
+
+          wakeWordFloatBufferRef.current = merged.slice(offset);
+        };
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        if (audioContext.state === "suspended") {
+          try {
+            await audioContext.resume();
+          } catch (error) {
+            console.warn(
+              "Impossible de reprendre l'AudioContext pour le mode réveil",
+              error
+            );
+          }
         }
 
         const fallbackMessage = describeFallback(fallbackInfo);
@@ -2366,11 +2267,15 @@ function App() {
           );
         } else if (error?.message === "porcupine-factory-missing") {
           setVoiceError(
-            "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web-en-worker et de @picovoice/web-voice-processor."
+            "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web."
           );
         } else if (error?.message === "porcupine-jarvis-missing") {
           setVoiceError(
-            "Le mot-clé intégré \"Jarvis\" est indisponible avec la librairie Porcupine installée. Mets à jour @picovoice/porcupine-web-en-worker ou fournis un fichier .ppn compatible."
+            "Le mot-clé intégré \"Jarvis\" est indisponible avec la librairie Porcupine installée. Mets à jour @picovoice/porcupine-web ou fournis un fichier .ppn compatible."
+          );
+        } else if (error?.message === "porcupine-instance-missing") {
+          setVoiceError(
+            "Impossible d'initialiser Porcupine avec les mots-clés fournis. Vérifie le fichier .ppn ou mets à jour la librairie."
           );
         } else if (isPorcupineVersionMismatchError(error)) {
           const mismatchDetails = extractPorcupineVersionMismatch(error);
