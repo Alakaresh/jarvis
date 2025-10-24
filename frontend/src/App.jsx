@@ -158,7 +158,8 @@ const REALTIME_VOICES = [
   { value: "alloy", label: "Alloy" },
 ];
 
-const PICOVOICE_WAKE_WORD_LABEL = "Jarvis";
+const PICOVOICE_WAKE_WORD_LABEL = "Alexa";
+const PICOVOICE_WAKE_WORD_BUILTIN_KEY = "ALEXA";
 const PICOVOICE_WAKE_WORD_SENSITIVITY = 0.6;
 const PICOVOICE_KEYWORD_PATH = "/keywords/jarvis.ppn";
 const PICOVOICE_SAMPLE_RATE = 16000;
@@ -287,36 +288,73 @@ const isPorcupineVersionMismatchError = (error) => {
   );
 };
 
-const getJarvisKeywordFromEnum = (enumCandidate) => {
+const normaliseWakeWordString = (candidate) => {
+  if (typeof candidate !== "string") {
+    return "";
+  }
+
+  return candidate.trim().toLowerCase();
+};
+
+const getWakeWordKeywordFromEnum = (enumCandidate) => {
   if (!enumCandidate || typeof enumCandidate !== "object") {
     return null;
   }
 
-  if (enumCandidate.JARVIS) {
-    return enumCandidate.JARVIS;
+  if (enumCandidate[PICOVOICE_WAKE_WORD_BUILTIN_KEY]) {
+    return enumCandidate[PICOVOICE_WAKE_WORD_BUILTIN_KEY];
   }
 
-  const jarvisKey = Object.keys(enumCandidate).find(
-    (key) => key && key.toLowerCase() === "jarvis"
-  );
-
-  if (jarvisKey) {
-    return enumCandidate[jarvisKey];
-  }
-
-  const matchingValue = Object.values(enumCandidate).find((value) => {
-    if (!value || typeof value !== "object") {
+  const wakeWordKey = Object.keys(enumCandidate).find((key) => {
+    if (!key) {
       return false;
     }
 
-    const label =
-      typeof value.label === "string" ? value.label.toLowerCase() : "";
-    const builtinKeyword =
-      typeof value.builtinKeyword === "string"
-        ? value.builtinKeyword.toLowerCase()
-        : "";
+    const trimmed = key.trim();
+    if (!trimmed) {
+      return false;
+    }
 
-    return label === "jarvis" || builtinKeyword === "jarvis";
+    return (
+      trimmed.toUpperCase() === PICOVOICE_WAKE_WORD_BUILTIN_KEY ||
+      normaliseWakeWordString(trimmed) ===
+        normaliseWakeWordString(PICOVOICE_WAKE_WORD_LABEL)
+    );
+  });
+
+  if (wakeWordKey) {
+    return enumCandidate[wakeWordKey];
+  }
+
+  const matchingValue = Object.values(enumCandidate).find((value) => {
+    if (!value) {
+      return false;
+    }
+
+    if (typeof value === "string") {
+      const normalisedValue = normaliseWakeWordString(value);
+      return (
+        normalisedValue ===
+          normaliseWakeWordString(PICOVOICE_WAKE_WORD_LABEL) ||
+        value.trim().toUpperCase() === PICOVOICE_WAKE_WORD_BUILTIN_KEY
+      );
+    }
+
+    if (typeof value !== "object") {
+      return false;
+    }
+
+    const label = normaliseWakeWordString(value.label);
+    const builtinKeyword = normaliseWakeWordString(
+      value.builtinKeyword ?? value.builtin
+    );
+
+    return (
+      label === normaliseWakeWordString(PICOVOICE_WAKE_WORD_LABEL) ||
+      value?.builtinKeyword === PICOVOICE_WAKE_WORD_BUILTIN_KEY ||
+      value?.builtin === PICOVOICE_WAKE_WORD_BUILTIN_KEY ||
+      builtinKeyword === normaliseWakeWordString(PICOVOICE_WAKE_WORD_LABEL)
+    );
   });
 
   return matchingValue ?? null;
@@ -326,7 +364,7 @@ const resolvePorcupineModule = (module) => {
   if (!module) {
     return {
       porcupineClass: null,
-      jarvisKeyword: null,
+      wakeWordKeyword: null,
       keywordEnum: null,
       version: null,
     };
@@ -388,7 +426,7 @@ const resolvePorcupineModule = (module) => {
 
   return {
     porcupineClass: porcupineClass ?? null,
-    jarvisKeyword: getJarvisKeywordFromEnum(keywordEnum),
+    wakeWordKeyword: getWakeWordKeywordFromEnum(keywordEnum),
     keywordEnum: keywordEnum ?? null,
     version: libraryVersion ?? null,
   };
@@ -1839,7 +1877,7 @@ function App() {
 
         const {
           porcupineClass: PorcupineClass,
-          jarvisKeyword: builtInJarvisKeyword,
+          wakeWordKeyword: builtInWakeWordKeyword,
           version: moduleVersion,
         } = resolvePorcupineModule(porcupineModule);
 
@@ -1943,35 +1981,35 @@ function App() {
                 info.mismatchDetails?.libraryVersion ?? libraryVersionText;
 
               if (keywordVersion && libraryVersion) {
-                return `Le mot-clé Porcupine (.ppn) a été généré pour la version ${keywordVersion} alors que la librairie embarquée est ${libraryVersion}. Utilisation du mot-clé intégré "Jarvis".`;
+                return `Le mot-clé Porcupine (.ppn) a été généré pour la version ${keywordVersion} alors que la librairie embarquée est ${libraryVersion}. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
               }
 
               if (keywordVersion) {
-                return `Le mot-clé Porcupine (.ppn) (${keywordVersion}) n'est pas compatible. Utilisation du mot-clé intégré "Jarvis".`;
+                return `Le mot-clé Porcupine (.ppn) (${keywordVersion}) n'est pas compatible. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
               }
 
               if (libraryVersion) {
-                return `Le mot-clé Porcupine (.ppn) fourni n'est pas compatible avec la librairie ${libraryVersion}. Utilisation du mot-clé intégré "Jarvis".`;
+                return `Le mot-clé Porcupine (.ppn) fourni n'est pas compatible avec la librairie ${libraryVersion}. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
               }
 
-              return "Le mot-clé Porcupine (.ppn) fourni n'est pas compatible. Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Le mot-clé Porcupine (.ppn) fourni n'est pas compatible. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             }
             case "placeholder":
-              return "Le fichier jarvis.ppn fourni est un exemple. Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Le fichier jarvis.ppn fourni est un exemple. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             case "not-found":
-              return "Mot-clé personnalisé introuvable (frontend/public/keywords/jarvis.ppn). Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Mot-clé personnalisé introuvable (frontend/public/keywords/jarvis.ppn). Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             case "http-error": {
               const statusText = info.status ? ` (code ${info.status})` : "";
-              return `Impossible de charger le fichier jarvis.ppn${statusText}. Utilisation du mot-clé intégré \"Jarvis\".`;
+              return `Impossible de charger le fichier jarvis.ppn${statusText}. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             }
             case "empty":
-              return "Le fichier jarvis.ppn est vide. Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Le fichier jarvis.ppn est vide. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             case "unavailable":
-              return "Impossible de charger le fichier jarvis.ppn. Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Impossible de charger le fichier jarvis.ppn. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             case "keyword-invalid":
-              return "Le fichier jarvis.ppn est invalide ou corrompu. Utilisation du mot-clé intégré \"Jarvis\".";
+              return `Le fichier jarvis.ppn est invalide ou corrompu. Utilisation du mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}".`;
             default:
-              return "Mot-clé intégré \"Jarvis\" utilisé par défaut.";
+              return `Mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}" utilisé par défaut.`;
           }
         };
 
@@ -2007,7 +2045,7 @@ function App() {
               }
             } catch (porcupineError) {
               if (
-                builtInJarvisKeyword &&
+                builtInWakeWordKeyword &&
                 (isPorcupineVersionMismatchError(porcupineError) ||
                   isPorcupineInvalidArgumentError(porcupineError))
               ) {
@@ -2020,7 +2058,7 @@ function App() {
                     libraryVersion: porcupineLibraryVersion,
                   };
                   console.warn(
-                    "Mot-clé Porcupine incompatible avec la version embarquée. Utilisation du mot-clé intégré 'Jarvis'.",
+                    `Mot-clé Porcupine incompatible avec la version embarquée. Utilisation du mot-clé intégré '${PICOVOICE_WAKE_WORD_LABEL}'.`,
                     porcupineError
                   );
                 } else {
@@ -2029,7 +2067,7 @@ function App() {
                     libraryVersion: porcupineLibraryVersion,
                   };
                   console.warn(
-                    "Mot-clé Porcupine personnalisé invalide. Utilisation du mot-clé intégré 'Jarvis'.",
+                    `Mot-clé Porcupine personnalisé invalide. Utilisation du mot-clé intégré '${PICOVOICE_WAKE_WORD_LABEL}'.`,
                     porcupineError
                   );
                 }
@@ -2041,12 +2079,12 @@ function App() {
         }
 
         if (!porcupineInstance) {
-          if (!builtInJarvisKeyword) {
-            throw new Error("porcupine-jarvis-missing");
+          if (!builtInWakeWordKeyword) {
+            throw new Error("porcupine-wake-word-missing");
           }
 
           const builtinKeywordCandidates = buildBuiltinKeywordCandidates(
-            builtInJarvisKeyword,
+            builtInWakeWordKeyword,
             PICOVOICE_WAKE_WORD_LABEL
           );
 
@@ -2227,11 +2265,11 @@ function App() {
         ) {
           if (fallbackInfo.type === "http-error" && fallbackInfo.status) {
             console.warn(
-              `Mot-clé Porcupine personnalisé indisponible (statut HTTP ${fallbackInfo.status}). Utilisation du mot-clé intégré 'Jarvis'.`
+              `Mot-clé Porcupine personnalisé indisponible (statut HTTP ${fallbackInfo.status}). Utilisation du mot-clé intégré '${PICOVOICE_WAKE_WORD_LABEL}'.`
             );
           } else {
             console.warn(
-              `Mot-clé Porcupine personnalisé indisponible (${fallbackInfo.type}). Utilisation du mot-clé intégré 'Jarvis'.`
+              `Mot-clé Porcupine personnalisé indisponible (${fallbackInfo.type}). Utilisation du mot-clé intégré '${PICOVOICE_WAKE_WORD_LABEL}'.`
             );
           }
         }
@@ -2269,9 +2307,9 @@ function App() {
           setVoiceError(
             "Impossible de charger la librairie Porcupine. Vérifie l'installation de @picovoice/porcupine-web."
           );
-        } else if (error?.message === "porcupine-jarvis-missing") {
+        } else if (error?.message === "porcupine-wake-word-missing") {
           setVoiceError(
-            "Le mot-clé intégré \"Jarvis\" est indisponible avec la librairie Porcupine installée. Mets à jour @picovoice/porcupine-web ou fournis un fichier .ppn compatible."
+            `Le mot-clé intégré "${PICOVOICE_WAKE_WORD_LABEL}" est indisponible avec la librairie Porcupine installée. Mets à jour @picovoice/porcupine-web ou fournis un fichier .ppn compatible.`
           );
         } else if (error?.message === "porcupine-instance-missing") {
           setVoiceError(
@@ -2537,7 +2575,7 @@ function App() {
     ? "Ajoute VITE_PICOVOICE_ACCESS_KEY dans frontend/.env pour activer le mode réveil."
     : isWakeWordEnabled
     ? "Le mode réveil est actif : dis ton mot-clé pour lancer Jarvis."
-    : "Active le mot-clé Jarvis pour démarrer automatiquement la session vocale.";
+    : `Active le mot-clé ${PICOVOICE_WAKE_WORD_LABEL} pour démarrer automatiquement la session vocale.`;
   const wakeWordButtonIcon = isWakeWordEnabled ? "🛑" : "👂";
   const isWakeWordToggleDisabled = !hasWakeWordAccessKey || isTranscribingAudio;
 
